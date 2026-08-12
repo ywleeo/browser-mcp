@@ -1,0 +1,273 @@
+"""Application tests for site adapter transport and immutable pagination."""
+
+from __future__ import annotations
+
+import json
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from browser_mcp.application import BrowserService
+from browser_mcp.config import AppSettings
+from browser_mcp.models import BrowserFetchPayload
+from browser_mcp.sites.auth import SiteLoginRequiredError
+from browser_mcp.sites.models import (
+    SitePageRequest,
+    WebSearchRequest,
+    XhsNoteRequest,
+    XhsSearchRequest,
+    XhsUserNotesRequest,
+    XSearchRequest,
+    ZhihuContentRequest,
+    ZhihuInvitationsRequest,
+    ZhihuSearchRequest,
+)
+from browser_mcp.sites.service import SiteService
+from tests.helpers import FakeBridge, allow_public_url_policy
+
+
+def _zhihu_payload() -> BrowserFetchPayload:
+    """Build one rendered Zhihu answer payload for service tests."""
+    state = {
+        "initialState": {
+            "entities": {
+                "questions": {"123": {"title": "服务测试"}},
+                "answers": {
+                    "456": {
+                        "author": {"name": "作者"},
+                        "content": "<p>" + "内容" * 20 + "</p>",
+                    }
+                },
+                "users": {},
+            }
+        }
+    }
+    html = f'<script id="js-initialData">{json.dumps(state)}</script>'
+    return BrowserFetchPayload(
+        final_url="https://www.zhihu.com/question/123/answer/456",
+        html=html,
+    )
+
+
+@pytest.mark.asyncio
+async def test_site_service_routes_namespaced_search_requests(tmp_path: Path) -> None:
+    """Zhihu and XHS searches should use only their isolated extension namespaces."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("zhihu.fetch", "search")] = {"data": [], "paging": {"is_end": True}}
+    bridge.site_responses[("xhs.fetch", "search")] = {"data": {"items": [], "has_more": False}}
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    zhihu = await service.zhihu_search(ZhihuSearchRequest(keyword="MCP"))
+    xhs = await service.xhs_search(XhsSearchRequest(keyword="MCP"))
+
+    assert zhihu.items == ()
+    assert xhs.items == ()
+    assert bridge.site_requests[0][:2] == ("zhihu.fetch", "search")
+    assert bridge.site_requests[1][:2] == ("xhs.fetch", "search")
+
+
+@pytest.mark.asyncio
+async def test_zhihu_content_is_snapshotted_and_pageable(tmp_path: Path) -> None:
+    """Long normalized content should continue without a second network fetch."""
+    bridge = FakeBridge(tmp_path / "extension", _zhihu_payload())
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    first = await service.zhihu_content(
+        ZhihuContentRequest.model_validate(
+            {
+                "url": "https://www.zhihu.com/question/123/answer/456",
+                "max_chars": 20,
+            }
+        )
+    )
+    second = await service.read_page(
+        SitePageRequest(snapshot_id=first.snapshot_id, offset=first.next_offset or 0, max_chars=20)
+    )
+
+    assert first.complete is False
+    assert second.range_start == first.range_end
+    assert len(bridge.fetches) == 2
+
+
+@pytest.mark.asyncio
+async def test_xhs_note_passes_security_parameters_to_extension(tmp_path: Path) -> None:
+    """The signed token should survive request validation and bridge dispatch."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("xhs.fetch", "note")] = {
+        "note": {
+            "noteDetailMap": {"n1": {"note": {"title": "笔记", "user": {}, "interactInfo": {}}}}
+        }
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    request = XhsNoteRequest.model_validate(
+        {"url": ("https://www.xiaohongshu.com/explore/n1?xsec_token=a%2Bb&xsec_source=pc_search")}
+    )
+
+    result = await service.xhs_note(request)
+
+    assert result.title == "笔记"
+    assert bridge.site_requests[0][2]["xsecToken"] == "a+b"
+
+
+@pytest.mark.asyncio
+async def test_xhs_user_notes_defaults_to_logged_in_account_and_bounds_pages(
+    tmp_path: Path,
+) -> None:
+    """The service should leave account discovery to Chrome and pass the page budget."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("xhs.fetch", "user_notes")] = {
+        "user_id": "logged-in-user",
+        "nickname": "作者",
+        "complete": True,
+        "pages_fetched": 1,
+        "pages": [{"notes": [], "cursor": "", "has_more": False}],
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    result = await service.xhs_user_notes(XhsUserNotesRequest(max_pages=3))
+
+    assert result.user_id == "logged-in-user"
+    assert result.complete is True
+    assert bridge.site_requests[0] == (
+        "xhs.fetch",
+        "user_notes",
+        {"userId": "", "maxPages": 3},
+    )
+
+
+@pytest.mark.asyncio
+async def test_zhihu_invitations_passes_day_boundary_and_page_limit(tmp_path: Path) -> None:
+    """Invitation acquisition should stop against a China-local day boundary."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("zhihu.fetch", "invitations")] = {
+        "pages": [],
+        "complete": True,
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    result = await service.zhihu_invitations(
+        ZhihuInvitationsRequest(day=date(2026, 8, 12), max_pages=3)
+    )
+
+    assert result.complete is True
+    namespace, action, args = bridge.site_requests[0]
+    assert (namespace, action) == ("zhihu.fetch", "invitations")
+    assert args["maxPages"] == 3
+    assert args["startTimestamp"] == 1_786_464_000
+
+
+@pytest.mark.asyncio
+async def test_rendered_search_services_build_safe_engine_and_social_urls(tmp_path: Path) -> None:
+    """New search services should encode keywords and reuse the guarded Chrome fetch path."""
+    bridge = FakeBridge(tmp_path / "extension")
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    bridge.payload = BrowserFetchPayload(
+        final_url="https://www.google.com/search?q=MCP+browser",
+        html='<a href="https://example.com"><h3>Example</h3></a>',
+    )
+
+    google = await service.google_search(WebSearchRequest(keyword="MCP browser"))
+
+    assert google.items[0].url == "https://example.com"
+    assert str(bridge.fetches[-1].url) == "https://www.google.com/search?q=MCP+browser"
+
+    bridge.payload = BrowserFetchPayload(
+        final_url="https://cn.bing.com/search?q=MCP+browser",
+        html=(
+            '<ol id="b_results"><li class="b_algo">'
+            '<h2><a href="https://example.com">Example</a></h2>'
+            "</li></ol>"
+        ),
+    )
+
+    bing = await service.bing_search(WebSearchRequest(keyword="MCP browser"))
+
+    assert bing.items[0].url == "https://example.com"
+    assert str(bridge.fetches[-1].url) == "https://cn.bing.com/search?q=MCP+browser"
+
+    bridge.payload = BrowserFetchPayload(
+        final_url="https://www.sogou.com/web?query=MCP+browser",
+        html=(
+            '<div class="rb"><h3><a href="https://example.com">Example</a></h3>'
+            '<div id="cacheresult_summary_0">Summary</div></div>'
+        ),
+    )
+
+    sogou = await service.sogou_search(WebSearchRequest(keyword="MCP browser"))
+
+    assert sogou.items[0].url == "https://example.com"
+    assert str(bridge.fetches[-1].url) == "https://www.sogou.com/web?query=MCP+browser"
+
+    bridge.payload = BrowserFetchPayload(
+        final_url="https://x.com/search?q=MCP+browser&src=typed_query&f=live",
+        html="""
+        <article data-testid="tweet">
+          <div data-testid="User-Name"><span>Alice</span><span>@alice</span></div>
+          <a href="/alice/status/123"><time datetime="2026-08-12T00:00:00Z"></time></a>
+          <div data-testid="tweetText">MCP post</div>
+        </article>
+        """,
+    )
+
+    x_result = await service.x_search(
+        XSearchRequest.model_validate(
+            {"keyword": "MCP browser", "sort": "latest", "limit": 5}
+        )
+    )
+
+    assert x_result.items[0].post_id == "123"
+    assert str(bridge.fetches[-1].url).endswith("q=MCP+browser&src=typed_query&f=live")
+
+
+@pytest.mark.asyncio
+async def test_logged_out_platform_is_blocked_before_target_request(tmp_path: Path) -> None:
+    """A failed preflight must not dispatch the requested platform action."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.logged_in_sites["zhihu"] = False
+    bridge.site_responses[("zhihu.fetch", "search")] = {
+        "data": [],
+        "paging": {"is_end": True},
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    with pytest.raises(SiteLoginRequiredError, match="尚未登录知乎"):
+        await service.zhihu_search(ZhihuSearchRequest(keyword="不应执行"))
+
+    assert bridge.site_requests == []
+    assert [str(request.url) for request in bridge.fetches] == ["https://www.zhihu.com/"]

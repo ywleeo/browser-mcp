@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "browser-mcp"
+version = "0.8.0"
+description = "Local MCP server for reading and interacting with web pages through real Chrome."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "ywleeo" }]
+dependencies = [
+  "httpx>=0.28,<1",
+  "mcp==2.0.0",
+  "platformdirs>=4.4,<5",
+  "pydantic>=2.12,<3",
+  "readability-lxml>=0.8.4.1,<0.9",
+  "websockets>=15,<16",
+]
+
+[project.scripts]
+browser-mcp = "browser_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.405,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.2,<2",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/browser_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"extension/background.js" = "browser_mcp/extension/background.js"
+"extension/content_bridge.js" = "browser_mcp/extension/content_bridge.js"
+"extension/content_inject.js" = "browser_mcp/extension/content_inject.js"
+"extension/manifest.json" = "browser_mcp/extension/manifest.json"
+"extension/options.html" = "browser_mcp/extension/options.html"
+"extension/options.js" = "browser_mcp/extension/options.js"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "D", "E", "F", "I", "UP"]
+ignore = ["D203", "D213"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

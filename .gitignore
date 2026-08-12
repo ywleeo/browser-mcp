@@ -1,0 +1,12 @@
+# Python, test, and build outputs.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+dist/
+
+# Local extension pairing artifacts contain machine-specific metadata and secrets.
+extension/build-info.js
+extension/pairing.json

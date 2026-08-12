@@ -1,0 +1,1 @@
+"""Browser MCP test package."""

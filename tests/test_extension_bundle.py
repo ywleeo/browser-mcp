@@ -1,0 +1,47 @@
+"""Tests for unpacked extension installation and pairing metadata."""
+
+import json
+import os
+from pathlib import Path
+from typing import cast
+
+from browser_mcp.bridge.bundle import ExtensionBundle
+from browser_mcp.bridge.manager import BRIDGE_PATH
+
+
+def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) -> None:
+    """Repeated starts should update code without invalidating the loaded extension."""
+    bundle = ExtensionBundle(tmp_path, tmp_path / "extension", 17_880, 10, BRIDGE_PATH)
+
+    first = bundle.ensure_installed()
+    second = bundle.ensure_installed()
+    pairing = cast(
+        dict[str, object],
+        json.loads((first.directory / "pairing.json").read_text(encoding="utf-8")),
+    )
+
+    assert first.token == second.token
+    assert first.build_id == second.build_id
+    assert (first.directory / "manifest.json").is_file()
+    assert (first.directory / "background.js").is_file()
+    assert (first.directory / "content_inject.js").is_file()
+    assert (first.directory / "content_bridge.js").is_file()
+    assert first.build_id in (first.directory / "build-info.js").read_text(encoding="utf-8")
+    assert pairing["base_port"] == 17_880
+    assert pairing["pool_size"] == 10
+    assert pairing["path"] == BRIDGE_PATH
+    assert pairing["token"] == first.token
+    background = (first.directory / "background.js").read_text(encoding="utf-8")
+    assert "const URL_CHECK_TIMEOUT_MS = 20000;" in background
+    assert 'message.type === "browser.interact"' in background
+    assert "chrome.tabs.captureVisibleTab" in background
+    assert "async function executeDomClick" in background
+    assert 'new InputEvent("input"' in background
+    assert 'referenceAttribute = "data-browser-mcp-ref"' in background
+    assert "crypto.randomUUID().slice(0, 8)" in background
+
+    if os.name != "nt":
+        token_mode = (tmp_path / "pairing-token").stat().st_mode & 0o777
+        pairing_mode = (first.directory / "pairing.json").stat().st_mode & 0o777
+        assert token_mode == 0o600
+        assert pairing_mode == 0o600

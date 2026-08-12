@@ -1,0 +1,68 @@
+"""Tests for validated visual browser interaction requests."""
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from browser_mcp.application.browser_service import BrowserService
+from browser_mcp.config import AppSettings
+from browser_mcp.models import (
+    BrowserClickRequest,
+    BrowserPressKey,
+    BrowserPressRequest,
+    BrowserScrollDirection,
+    BrowserScrollRequest,
+    BrowserSelectRequest,
+    BrowserSnapshotRequest,
+    BrowserTypeRequest,
+)
+from tests.helpers import FakeBridge, allow_public_url_policy
+
+
+def test_click_request_requires_exactly_one_target_strategy() -> None:
+    """Clicks must never guess between absent, partial, or conflicting targets."""
+    assert BrowserClickRequest(element_id="e1").element_id == "e1"
+    assert BrowserClickRequest(x=12, y=34).x == 12
+    with pytest.raises(ValidationError, match="either element_id or both x and y"):
+        BrowserClickRequest()
+    with pytest.raises(ValidationError, match="x and y must be provided together"):
+        BrowserClickRequest(x=12)
+    with pytest.raises(ValidationError, match="either element_id or both x and y"):
+        BrowserClickRequest(element_id="e1", x=12, y=34)
+
+
+@pytest.mark.asyncio
+async def test_browser_service_dispatches_every_visual_action_with_typed_arguments(
+    tmp_path: Path,
+) -> None:
+    """Application methods should preserve action semantics below the MCP transport."""
+    bridge = FakeBridge(tmp_path / "extension")
+    service = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+
+    snapshot = await service.visual_snapshot(
+        BrowserSnapshotRequest.model_validate({"url": "https://example.com/form"})
+    )
+    await service.click(BrowserClickRequest(element_id="e1"))
+    await service.scroll(
+        BrowserScrollRequest(direction=BrowserScrollDirection.DOWN, amount=480)
+    )
+    await service.type_text(BrowserTypeRequest(element_id="e1", text="Browser MCP"))
+    await service.press(BrowserPressRequest(key=BrowserPressKey.ENTER))
+    await service.select(BrowserSelectRequest(element_id="e2", value="中文"))
+
+    assert snapshot.state.elements[0].name == "Search"
+    assert [action for action, _args in bridge.interactions] == [
+        "snapshot",
+        "click",
+        "scroll",
+        "type",
+        "press",
+        "select",
+    ]
+    assert bridge.interactions[2][1]["direction"] == "down"
+    assert bridge.interactions[4][1]["key"] == "Enter"
