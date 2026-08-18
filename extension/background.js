@@ -1,7 +1,7 @@
 // Browser MCP Bridge — authenticated fetch and visual-interaction worker.
 //
-// Read adapters use short-lived inactive tabs. Visual tools reuse one managed tab,
-// return screenshots plus short-lived element references, and guard every navigation.
+// Read adapters use short-lived inactive tabs. Visual tools reuse one isolated background window,
+// capture its active tab without focusing the window, and guard every navigation.
 
 import { BUNDLE_BUILD_ID } from "./build-info.js";
 
@@ -26,6 +26,7 @@ const pendingUrlChecks = new Map();
 const pendingXhsSearches = new Map();
 const pendingXhsUserNotes = new Map();
 const interactiveTabs = new Map();
+const interactionWindows = new Map();
 const interactionQueues = new Map();
 const interactionDebuggers = new Map();
 const lastScreenshotAt = new Map();
@@ -471,7 +472,7 @@ async function dispatchBrowserInteraction(state, message) {
       await closeInteractionDebugger(session);
       debuggerSession = null;
     }
-    const screenshotData = await captureInteractionScreenshot(tabId);
+    const screenshotData = await captureInteractionScreenshot(tabId, session);
     const visual = await captureInteractionState(tabId, action, screenshotData);
     reply({ ok: true, data: visual });
   } catch (error) {
@@ -598,32 +599,46 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
   if (existingTabId != null) {
     try {
       const existing = await chrome.tabs.get(existingTabId);
+      const isolatedWindowId = interactionWindows.get(session);
+      const needsIsolatedTab = typeof requestedUrl === "string"
+        && isolatedWindowId !== existing.windowId;
       if (
         /^https?:\/\//i.test(String(existing.url || ""))
+        && !needsIsolatedTab
       ) return existing;
-      if (!(action === "snapshot" && typeof requestedUrl === "string")) {
+      if (needsIsolatedTab) {
+        interactiveTabs.delete(session);
+        await closeInteractionDebugger(session);
+      } else if (!(action === "snapshot" && typeof requestedUrl === "string")) {
         throw new Error("managed tab is no longer on a public webpage; provide url to browser_snapshot");
+      } else {
+        interactiveTabs.delete(session);
+        interactionWindows.delete(session);
+        await closeInteractionDebugger(session);
+        if (isolatedWindowId === existing.windowId) {
+          await chrome.tabs.remove(existingTabId).catch(() => {});
+        }
       }
-      interactiveTabs.delete(session);
-      await closeInteractionDebugger(session);
-      await chrome.tabs.remove(existingTabId).catch(() => {});
     } catch {
       interactiveTabs.delete(session);
+      interactionWindows.delete(session);
     }
   }
   if (action !== "snapshot") {
     throw new Error("no interactive tab; call browser_snapshot before browser actions");
   }
   if (typeof requestedUrl === "string" && /^https?:\/\//i.test(requestedUrl)) {
-    const publicTabs = await chrome.tabs.query({});
-    const matching = publicTabs.find((tab) => String(tab.url || "") === requestedUrl);
-    if (matching?.id != null) {
-      interactiveTabs.set(session, matching.id);
-      return matching;
+    const createdWindow = await chrome.windows.create({
+      url: "about:blank",
+      focused: false,
+      type: "normal",
+    });
+    const [created] = createdWindow.tabs || [];
+    if (created?.id == null || createdWindow.id == null) {
+      throw new Error("Chrome did not create an isolated interaction window");
     }
-    const created = await chrome.tabs.create({ url: "about:blank", active: false });
-    if (created?.id == null) throw new Error("Chrome did not create an interactive tab");
     interactiveTabs.set(session, created.id);
+    interactionWindows.set(session, createdWindow.id);
     return created;
   }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -631,6 +646,7 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
     throw new Error("no public webpage is active; provide url to browser_snapshot")
   }
   interactiveTabs.set(session, active.id);
+  interactionWindows.delete(session);
   return active;
 }
 
@@ -642,7 +658,7 @@ async function executeInteractionAction(tabId, action, args) {
       if (!/^https?:\/\//i.test(url)) throw new Error("browser_snapshot requires an http(s) URL");
       const current = await chrome.tabs.get(tabId);
       if (String(current.url || "") !== url) {
-        await chrome.tabs.update(tabId, { url, active: true });
+        await chrome.tabs.update(tabId, { url });
       }
     }
     return;
@@ -940,11 +956,16 @@ function boundedWait(value, fallback) {
   return Math.max(0, Math.min(30000, Number(value)));
 }
 
-/** Capture the active managed viewport without mixing scripting and debugger contexts. */
-async function captureInteractionScreenshot(tabId) {
+/** Capture the isolated window without focusing it or changing the user's selected tab. */
+async function captureInteractionScreenshot(tabId, session) {
   const tab = await chrome.tabs.get(tabId);
   if (tab.windowId == null) throw new Error("interactive tab has no window");
-  await chrome.tabs.update(tabId, { active: true });
+  if (tab.active !== true) {
+    if (interactionWindows.get(session) !== tab.windowId) {
+      throw new Error("refusing to activate an interaction tab in the user's current window");
+    }
+    await chrome.tabs.update(tabId, { active: true });
+  }
   const elapsed = Date.now() - (lastScreenshotAt.get(tab.windowId) || 0);
   if (elapsed < 600) {
     await new Promise((resolve) => setTimeout(resolve, 600 - elapsed));
@@ -956,9 +977,7 @@ async function captureInteractionScreenshot(tabId) {
   lastScreenshotAt.set(tab.windowId, Date.now());
   const separator = dataUrl.indexOf(",");
   const screenshotData = separator >= 0 ? dataUrl.slice(separator + 1) : "";
-  if (!screenshotData) {
-    throw new Error("Chrome returned no screenshot data");
-  }
+  if (!screenshotData) throw new Error("Chrome returned no screenshot data");
   return screenshotData;
 }
 
@@ -1616,6 +1635,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   for (const [session, managedTabId] of interactiveTabs.entries()) {
     if (managedTabId !== tabId) continue;
     interactiveTabs.delete(session);
+    interactionWindows.delete(session);
     void closeInteractionDebugger(session);
   }
 });

@@ -35,6 +35,11 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "const URL_CHECK_TIMEOUT_MS = 20000;" in background
     assert 'message.type === "browser.interact"' in background
     assert "chrome.tabs.captureVisibleTab" in background
+    assert "chrome.windows.create" in background
+    assert "focused: false" in background
+    assert "chrome.tabs.update(tabId, { url, active: true })" not in background
+    assert "chrome.tabs.update(tabId, { url })" in background
+    assert "refusing to activate an interaction tab in the user's current window" in background
     assert "async function executeDomClick" in background
     assert 'new InputEvent("input"' in background
     assert 'referenceAttribute = "data-browser-mcp-ref"' in background
