@@ -1,5 +1,8 @@
 # Browser MCP
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/ywleeo-browser-mcp-1fpz06)](https://m8ven.ai/mcp/ywleeo-browser-mcp-1fpz06)
+<!-- m8ven-verify: 95f859e641d62950630af153ffb997b7 -->
+
 Browser MCP 是一个本地 MCP server，通过用户真实的 Chrome 会话读取和操作公开页面、
 JavaScript 渲染页面及登录态页面。
 
