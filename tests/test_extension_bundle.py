@@ -50,6 +50,9 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "wheelDelta * scrollDirection" in background
     assert "if (ui.clicked === 0)" in background
     assert "scroller.scrollTop = scroller.scrollHeight" not in background
+    assert "function readXhsNoteRuntimeState" in background
+    assert "window.__INITIAL_STATE__?.note?.noteDetailMap" in background
+    assert "func: readXhsNoteRuntimeState" in background
     assert 'message.action === "comments"' in background
 
     if os.name != "nt":

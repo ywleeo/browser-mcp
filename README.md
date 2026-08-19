@@ -34,6 +34,34 @@ uv sync
 
 下文中的 `/path/to/browser-mcp` 表示本项目在本机的绝对路径。
 
+## 升级
+
+源码安装提供 Agent 可直接执行的安全升级命令。先检查版本与仓库状态：
+
+```bash
+uv --directory /path/to/browser-mcp run browser-mcp upgrade --check --json
+```
+
+确认可以升级后执行：
+
+```bash
+uv --directory /path/to/browser-mcp run browser-mcp upgrade --apply --json
+```
+
+升级器只接受设置了 upstream 的 Git 分支，并遵循以下保护规则：
+
+- 工作区有未提交或未跟踪文件时拒绝升级。
+- 本地与远端分叉时拒绝升级，不创建隐式 merge commit。
+- 只使用 `git pull --ff-only` 更新源码。
+- 使用 `uv sync --frozen` 同步锁定依赖，不修改 `uv.lock`。
+
+`--apply` 成功并返回 `restart_required: true` 后，只需重启一次 Codex。新 MCP server
+启动时会刷新扩展 bundle；已加载的 Chrome 扩展根据 build ID 自动重载，无需重新选择扩展目录。
+
+Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用返回的
+`upgrade_check_command` 和 `upgrade_apply_command` 即可。wheel 或其他包管理器安装会返回
+`install_mode: "package"`，此时应使用原安装工具升级，而不是修改任意 Git 仓库。
+
 ## 配置 Codex
 
 使用 Codex CLI 添加 MCP server：
@@ -102,7 +130,13 @@ codex mcp remove browser_mcp
 {
   "state": "connected",
   "connected": true,
-  "bridge_port": 17880
+  "bridge_port": 17880,
+  "server_version": "0.8.2",
+  "install_mode": "source",
+  "project_root": "/path/to/browser-mcp",
+  "source_commit": "bee7e8b",
+  "upgrade_check_command": "uv --directory /path/to/browser-mcp run browser-mcp upgrade --check --json",
+  "upgrade_apply_command": "uv --directory /path/to/browser-mcp run browser-mcp upgrade --apply --json"
 }
 ```
 
@@ -133,7 +167,7 @@ server 启动时自动重新连接。更新扩展后若没有自动生效，请�
 
 | 工具 | 适用范围 | 能做什么 |
 | --- | --- | --- |
-| `browser_status` | 连接检查 | 检查 MCP server 与 Chrome 扩展是否连接，并提供排查连接问题所需的信息。 |
+| `browser_status` | 连接检查 | 检查 MCP server 与 Chrome 扩展是否连接，并返回服务版本、安装模式、源码 commit 及可直接执行的升级命令。 |
 | `browser_read` | 通用网页 | 使用真实 Chrome 打开网页，读取文章正文、页面可见文本、JavaScript 渲染内容及页面请求返回的数据；也能利用当前 Chrome 的网站登录状态。 |
 | `browser_read_page` | 通用网页 | 当网页内容较长时继续读取后续内容，并保持与首次读取相同的页面快照。 |
 | `browser_snapshot` | 网页操作 | 在共享当前登录态的后台 Chrome 窗口中打开网页，不切走用户当前页面；向 Agent 返回当前视口截图、可见文字以及带编号的按钮、链接、输入框等可操作元素。未提供网址时，可以观察当前页面。 |

@@ -101,6 +101,8 @@ Claude 或 Codex 至少一个客户端真实完成 `tools/list` 和 `browser_sta
 - 实现 extension bundle 释放、build fingerprint、版本探测和安装目录返回。
 - 源码模式固定使用项目根目录 `extension/`；pairing/build 运行时文件不进入 Git，wheel 安装
   保留用户数据目录回退。
+- 源码升级通过 `browser-mcp upgrade --check/--apply --json` 暴露给 Agent：拒绝脏工作区和
+  分叉分支，只允许 fast-forward，并在 Codex 重启后由 build ID 机制自动重载扩展。
 - Python bridge 实现：
   - 端口池抢占。
   - WebSocket path 校验。
@@ -108,7 +110,8 @@ Claude 或 Codex 至少一个客户端真实完成 `tools/list` 和 `browser_sta
   - ping/pong 与 MV3 保活。
   - pending request/request id。
   - timeout、断连清理、优雅退出。
-- `browser_status` 返回：连接状态、监听端口、extension 目录、extension 版本、build id、最近握手时间。
+- `browser_status` 返回：连接状态、监听端口、extension 目录、extension 版本、build id、
+  服务版本、安装模式、源码 commit、可执行升级命令和最近握手时间。
 - 使用 mock extension 完成协议集成测试。
 
 自动化和真实验收均通过：实时 ping/pong、错误 token、错误 path、端口池回退、断线重连、
@@ -207,6 +210,8 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
 - `xhs_note`：读取 SSR initial state。
 - `xhs_user_notes`：合并账号页 SSR 首屏和 signed `user_posted` 分页响应。
 - `xhs_comments`：滚动详情弹层自己的 `.note-scroller`，捕获页面签名的评论分页响应，展开子评论并按评论 ID 去重。
+- `xhs_note`：从已执行的 `window.__INITIAL_STATE__.note.noteDetailMap` 读取最小字段快照，
+  不再把包含 `Map` 等 JavaScript 值的 SSR 源码误当作严格 JSON。
 - 迁移 URL、shape、format fixtures；协议保留原始 JSON 与 typed output 的诊断边界。
 
 ### 5A 实现结果

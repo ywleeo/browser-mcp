@@ -26,6 +26,7 @@ from browser_mcp.models import (
     BrowserVisualResult,
 )
 from browser_mcp.security import PublicUrlPolicy, UrlPolicyError
+from browser_mcp.upgrade import installation_metadata
 
 LOGGER = logging.getLogger(__name__)
 BRIDGE_PATH: Final = "/browser-mcp-extension"
@@ -67,6 +68,7 @@ class BridgeManager:
         self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._url_policy = url_policy or PublicUrlPolicy()
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._installation = installation_metadata()
 
     @property
     def installed(self) -> InstalledExtension | None:
@@ -147,6 +149,7 @@ class BridgeManager:
                 "then call browser_status again."
             )
             state = "disconnected"
+        installation = self._installation
         return BrowserStatus(
             state=state,
             connected=connected,
@@ -155,6 +158,13 @@ class BridgeManager:
             extension_dir=str(installed.directory),
             extension_version=metadata.version if metadata else None,
             extension_build_id=metadata.build_id if metadata else None,
+            server_version=installation.server_version,
+            install_mode=installation.install_mode,
+            project_root=installation.project_root,
+            source_commit=installation.source_commit,
+            upgrade_check_command=installation.upgrade_check_command,
+            upgrade_apply_command=installation.upgrade_apply_command,
+            restart_instruction=installation.restart_instruction,
             last_seen_at=metadata.last_seen_at if metadata else None,
             detail=detail,
         )

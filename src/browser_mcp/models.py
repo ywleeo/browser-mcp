@@ -28,6 +28,13 @@ class BrowserStatus(BaseModel):
     extension_dir: str | None
     extension_version: str | None = None
     extension_build_id: str | None = None
+    server_version: str | None = None
+    install_mode: Literal["source", "package"] | None = None
+    project_root: str | None = None
+    source_commit: str | None = None
+    upgrade_check_command: str | None = None
+    upgrade_apply_command: str | None = None
+    restart_instruction: str | None = None
     last_seen_at: datetime | None = None
     detail: str
 

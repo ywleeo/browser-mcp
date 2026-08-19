@@ -46,6 +46,9 @@ Robin 的 bridge 位于：
 - 请求以 UUID 关联 reply，断连时会清空 pending request，避免调用一直等待超时。
 - 20 秒 ping 保活，解决 MV3 service worker 空闲回收问题。
 - extension bundle 有 build fingerprint，可发现已加载的 unpacked extension 版本过旧并触发 reload。
+- 源码安装提供独立的 `browser-mcp upgrade` 控制面：检查命令刷新 upstream 并输出 JSON，
+  应用命令只接受干净、可 fast-forward 的工作区，再执行冻结依赖同步。升级进程不尝试重启
+  正在承载它的 MCP host；重启边界明确交给 Codex，随后复用 build fingerprint 自动重载扩展。
 - `browser.fetch` 支持 `readability`、`text`、`raw`、`xhr` 四种采集模式。
 - 当前工作区新增了“页面 30 秒未达到 complete 时仍返回已渲染 DOM 快照”的容错，应保留。
 
@@ -143,7 +146,7 @@ Robin 的 bridge 位于：
 | MCP 接入 | 官方 `mcp` SDK，stdio/工具 schema 成熟 | 官方 `rmcp` SDK，类型与编译期约束更强 |
 | extension bridge | `asyncio` + `websockets` 足够，开发调试快 | 可较多复用 Robin 代码，运行时更轻 |
 | 网页/JSON 解析 | `lxml`、Readability、Beautiful Soup/Pydantic 生态适合快速迭代 | 现有 parser 可直接迁移，但站点变化后的修改成本较高 |
-| 本地部署 | `uv sync` / `uv run` 简单，但依赖 Python/uv | 单 binary 体验最佳 |
+| 本地部署 | `uv sync` / `uv run`；提供可供 Agent 调用的 check/apply 升级入口 | 单 binary 体验最佳 |
 | 迁移成本 | bridge 和 Rust parser 需要按行为重写 | 能复用更多现有 Rust 源码 |
 | 长期维护 | 更适合频繁变化的网站适配器和 fixture 调试 | 更适合稳定核心与强资源约束服务 |
 

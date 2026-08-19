@@ -1783,7 +1783,46 @@ async function runXhsUserNotes(state, args, reply) {
   }
 }
 
-/** Fetch one note HTML inside an authenticated XHS origin and parse its SSR state. */
+/** Read one JSON-safe note snapshot from XHS's already evaluated runtime state. */
+function readXhsNoteRuntimeState(noteId) {
+  const detailMap = window.__INITIAL_STATE__?.note?.noteDetailMap;
+  const detail = detailMap instanceof Map ? detailMap.get(noteId) : detailMap?.[noteId];
+  const note = detail?.note;
+  if (!note || typeof note !== "object") {
+    return { error: "note was not found in the evaluated XHS runtime state" };
+  }
+  const selected = {
+    type: note.type,
+    title: note.title,
+    desc: note.desc,
+    time: note.time,
+    user: note.user,
+    interactInfo: note.interactInfo,
+    imageList: note.imageList,
+    video: note.video,
+  };
+  try {
+    const safeNote = JSON.parse(JSON.stringify(selected, (_key, value) => {
+      if (value instanceof Map) return Object.fromEntries(value);
+      if (value instanceof Set) return Array.from(value);
+      if (typeof value === "bigint") return String(value);
+      return value;
+    }));
+    return {
+      state: {
+        note: {
+          noteDetailMap: {
+            [noteId]: { note: safeNote },
+          },
+        },
+      },
+    };
+  } catch (error) {
+    return { error: `unable to serialize XHS note state: ${error?.message || error}` };
+  }
+}
+
+/** Navigate an authenticated XHS tab and read its evaluated note state. */
 async function runXhsNote(state, args, reply) {
   const noteId = String(args.noteId || "").trim();
   if (!noteId) {
@@ -1810,24 +1849,14 @@ async function runXhsNote(state, args, reply) {
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS note tab");
     await waitForTabComplete(tabId);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 800));
     const [{ result } = {}] = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      args: [target.toString()],
-      func: async (url) => {
-        try {
-          const response = await fetch(url, { credentials: "include" });
-          if (!response.ok) return { error: `HTTP ${response.status}` };
-          const html = await response.text();
-          const match = html.match(
-            /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\})\s*;?\s*(?:<\/script>|\n)/,
-          );
-          if (!match) return { error: "note SSR state not found" };
-          return { state: JSON.parse(match[1].replace(/:\s*undefined/g, ": null")) };
-        } catch (error) {
-          return { error: String(error?.message || error) };
-        }
-      },
+      args: [noteId],
+      func: readXhsNoteRuntimeState,
     });
     if (!result || result.error) throw new Error(result?.error || "XHS note script returned no data");
     reply({ ok: true, data: result.state });
