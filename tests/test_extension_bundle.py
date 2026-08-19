@@ -57,6 +57,15 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "func: readXhsNoteRuntimeState" in background
     assert 'message.action === "comments"' in background
     assert 'message.type === "douyin.fetch"' in background
+    assert 'message.type === "xhs.mutate"' in background
+    assert 'message.type === "douyin.mutate"' in background
+    assert "function readXhsEngagementControl" in background
+    assert 'inactive: "#collected"' not in background
+    assert 'active: "#collected"' in background
+    assert "function readDouyinEngagementControl" in background
+    assert 'data-e2e="video-player-digg"' in background
+    assert "async function dispatchTrustedPointClick" in background
+    assert "the click was not retried" in background
     assert "function handleObservedDouyinResponse" in background
     assert "/general\\/search\\/stream" in background
     assert "function runDouyinComments" in background

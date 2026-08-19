@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from browser_mcp.sites.models import (
@@ -18,6 +21,16 @@ from browser_mcp.sites.xhs import (
     shape_xhs_search,
     shape_xhs_user_notes,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_real_xsec_tokens_are_not_embedded_in_smoke_source() -> None:
+    """Real high-entropy XHS access tokens must only enter smoke tests at runtime."""
+    source = (PROJECT_ROOT / "scripts" / "smoke_real.py").read_text(encoding="utf-8")
+
+    assert re.search(r"xsec_token=[A-Za-z0-9_-]{20,}", source) is None
+    assert "_find_xhs_media_url" in source
 
 
 def test_parse_xhs_note_url_preserves_signed_parameters() -> None:

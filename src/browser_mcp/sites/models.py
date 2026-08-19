@@ -136,6 +136,32 @@ class SiteLoginStatus(BaseModel):
     detail: str
 
 
+class SiteEngagementAction(StrEnum):
+    """Post-level account interactions supported by authenticated site adapters."""
+
+    LIKE = "like"
+    COLLECT = "collect"
+
+
+class SiteEngagementRequest(BaseModel):
+    """Validated desired state for one post-level like or collection action."""
+
+    url: HttpUrl
+    enabled: bool = True
+
+
+class SiteEngagementResult(BaseModel):
+    """Verified final state of one idempotent post-level account interaction."""
+
+    platform: SitePlatform
+    post_id: str
+    action: SiteEngagementAction
+    requested_state: bool
+    active: bool
+    changed: bool
+    url: str
+
+
 class SearchEngine(StrEnum):
     """Supported public web search engines."""
 

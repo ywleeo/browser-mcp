@@ -158,6 +158,18 @@ async def run_mock_site_extension(manager: BridgeManager, connected: asyncio.Eve
                         }
                     )
                 )
+            elif message.get("type") == "xhs.mutate":
+                assert message.get("action") == "like"
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "xhs.mutate.result",
+                            "id": message["id"],
+                            "ok": True,
+                            "data": {"active": True},
+                        }
+                    )
+                )
 
 
 async def run_mock_interaction_extension(manager: BridgeManager, connected: asyncio.Event) -> None:
@@ -466,8 +478,14 @@ async def test_namespaced_site_action_round_trip(tmp_path: Path) -> None:
             "search",
             {"keyword": "MCP"},
         )
+        mutation = await manager.request(
+            "xhs.mutate",
+            "like",
+            {"noteId": "n1", "enabled": True},
+        )
 
         assert payload == {"data": {"items": []}}
+        assert mutation == {"active": True}
     finally:
         extension_task.cancel()
         await asyncio.gather(extension_task, return_exceptions=True)

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser MCP Bridge",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Connects Browser MCP reading and interaction tools to this Chrome profile.",
   "permissions": ["alarms", "storage", "scripting", "tabs", "debugger"],
   "host_permissions": ["<all_urls>"],

@@ -10,11 +10,61 @@ from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import CallToolResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _display_url(value: object) -> object:
+    """Redact transient site access parameters from smoke-test console output."""
+    if not isinstance(value, str):
+        return value
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    query = urlencode(
+        [
+            (key, "[redacted]" if key.lower() == "xsec_token" else query_value)
+            for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
+
+
+async def _find_xhs_media_url(session: ClientSession, media: str) -> str:
+    """Find one current XHS media note and retain its runtime-generated access URL."""
+    if media == "video":
+        keywords = ("旅行 vlog", "日常 vlog", "美食 vlog")
+    elif media == "images":
+        keywords = ("风景壁纸", "摄影", "旅行攻略")
+    else:
+        raise ValueError(f"unsupported XHS smoke media kind: {media}")
+
+    for keyword in keywords:
+        for page in (1, 2):
+            result = await session.call_tool(
+                "xhs_search",
+                {"keyword": keyword, "page": page},
+            )
+            if result.is_error:
+                continue
+            data = cast(dict[str, Any], result.structured_content or {})
+            items = data.get("items")
+            if not isinstance(items, list):
+                continue
+            for raw_item in cast(list[object], items):
+                if not isinstance(raw_item, dict):
+                    continue
+                item = cast(dict[str, object], raw_item)
+                note_type = str(item.get("note_type") or "normal").lower()
+                matches = note_type == "video" if media == "video" else note_type != "video"
+                url = item.get("url")
+                if matches and isinstance(url, str) and "xsec_token=" in url:
+                    return url
+    raise RuntimeError(f"no current Xiaohongshu {media} note was found for smoke testing")
 
 
 def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -100,12 +150,12 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
                 or first.get("description")
                 or str(first.get("text") or "")[:120]
             )
-            summary["first_url"] = first.get("url")
+            summary["first_url"] = _display_url(first.get("url"))
     elif result.is_error:
         summary["error"] = getattr(result.content[0], "text", "")[:1000]
     elif "title" in data:
         summary["title"] = data.get("title")
-        summary["url"] = data.get("url")
+        summary["url"] = _display_url(data.get("url"))
         summary["kind"] = data.get("kind") or data.get("note_type")
         summary["complete"] = data.get("complete")
         summary["image_count"] = len(data.get("images") or [])
@@ -113,12 +163,12 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
             summary["comments_returned"] = len(data.get("comments") or [])
     elif "post_id" in data:
         summary["post_id"] = data.get("post_id")
-        summary["url"] = data.get("url")
+        summary["url"] = _display_url(data.get("url"))
         summary["author"] = data.get("handle") or data.get("author")
         summary["text_preview"] = str(data.get("text") or "")[:200]
     elif "aweme_id" in data:
         summary["aweme_id"] = data.get("aweme_id")
-        summary["url"] = data.get("url")
+        summary["url"] = _display_url(data.get("url"))
         summary["author"] = data.get("author")
         summary["description_preview"] = str(data.get("description") or "")[:200]
         summary["fetched"] = data.get("fetched")
@@ -241,27 +291,21 @@ async def _run(site: str) -> None:
                     note = await session.call_tool("xhs_note", {"url": first.get("url")})
                     _print_result("xhs_note", note)
             if site in {"xhs-media"}:
+                image_url = await _find_xhs_media_url(session, "images")
                 image_download = await session.call_tool(
                     "xhs_download",
                     {
-                        "url": (
-                            "https://www.xiaohongshu.com/explore/6a7e86010000000032021f2b"
-                            "?xsec_token=AB9OF0PnPVXAU5uBPH-g3fXXFr1ywhGgvbOXulXfskASw%3D"
-                            "&xsec_source=pc_search"
-                        ),
+                        "url": image_url,
                         "media": "images",
                         "max_file_mb": 256,
                     },
                 )
                 _print_result("xhs_download[images]", image_download)
+                video_url = await _find_xhs_media_url(session, "video")
                 video_download = await session.call_tool(
                     "xhs_download",
                     {
-                        "url": (
-                            "https://www.xiaohongshu.com/explore/68c3c653000000001c005b89"
-                            "?xsec_token=ABgcNAzS19QZjMU_864PXkO5TeN0pHfOj_xsnW0pW1TCU%3D"
-                            "&xsec_source=pc_search"
-                        ),
+                        "url": video_url,
                         "media": "video",
                         "max_file_mb": 512,
                     },
@@ -400,14 +444,11 @@ async def _run(site: str) -> None:
                 with TemporaryDirectory(prefix="browser-mcp-media-matrix-") as temporary:
                     destination = Path(temporary)
                     if site == "download-matrix":
+                        xhs_video_url = await _find_xhs_media_url(session, "video")
                         xhs_video = await session.call_tool(
                             "xhs_download",
                             {
-                                "url": (
-                                    "https://www.xiaohongshu.com/explore/6a8186ae00000000270212e7"
-                                    "?xsec_token=ABqw20tRrnooUenYYL0PhAaRVnqh7YayBnvlZY0MYxTw8%3D"
-                                    "&xsec_source=pc_search"
-                                ),
+                                "url": xhs_video_url,
                                 "media": "video",
                                 "output_dir": str(destination / "xhs-video"),
                                 "max_file_mb": 256,
@@ -476,7 +517,7 @@ async def _run(site: str) -> None:
                     {
                         "url": (
                             "https://testpages.eviltester.com/pages/forms/html-form/"
-                            "?browser-mcp-smoke=0.9.0"
+                            "?browser-mcp-smoke=0.10.0"
                         )
                     },
                 )

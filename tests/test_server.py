@@ -44,11 +44,15 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "zhihu_invitations",
         "xhs_search",
         "xhs_note",
+        "xhs_like",
+        "xhs_collect",
         "xhs_download",
         "xhs_comments",
         "xhs_user_notes",
         "douyin_search",
         "douyin_video",
+        "douyin_like",
+        "douyin_collect",
         "douyin_download",
         "douyin_comments",
         "x_search",
@@ -69,6 +73,8 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     press_annotations = annotations["browser_press"]
     xhs_download_annotations = annotations["xhs_download"]
     douyin_download_annotations = annotations["douyin_download"]
+    xhs_like_annotations = annotations["xhs_like"]
+    douyin_collect_annotations = annotations["douyin_collect"]
     assert snapshot_annotations is not None and snapshot_annotations.read_only_hint is True
     assert scroll_annotations is not None and scroll_annotations.read_only_hint is True
     assert click_annotations is not None and click_annotations.read_only_hint is False
@@ -80,6 +86,12 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     assert xhs_download_annotations.destructive_hint is False
     assert douyin_download_annotations is not None
     assert douyin_download_annotations.idempotent_hint is False
+    assert xhs_like_annotations is not None
+    assert xhs_like_annotations.read_only_hint is False
+    assert xhs_like_annotations.destructive_hint is True
+    assert xhs_like_annotations.idempotent_hint is True
+    assert douyin_collect_annotations is not None
+    assert douyin_collect_annotations.destructive_hint is True
     assert tools[0].annotations is not None
     assert tools[0].annotations.open_world_hint is False
     assert tools[1].annotations is not None

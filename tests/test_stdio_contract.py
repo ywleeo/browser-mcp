@@ -53,11 +53,15 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
                 "zhihu_invitations",
                 "xhs_search",
                 "xhs_note",
+                "xhs_like",
+                "xhs_collect",
                 "xhs_download",
                 "xhs_comments",
                 "xhs_user_notes",
                 "douyin_search",
                 "douyin_video",
+                "douyin_like",
+                "douyin_collect",
                 "douyin_download",
                 "douyin_comments",
                 "x_search",
@@ -76,7 +80,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
             assert structured["state"] == "disconnected"
             assert structured["bridge_port"] == bridge_port
             assert structured["extension_dir"] == str(tmp_path / "extension")
-            assert structured["server_version"] == "0.9.0"
+            assert structured["server_version"] == "0.10.0"
             assert structured["install_mode"] == "source"
             assert structured["project_root"] == str(PROJECT_ROOT)
             assert "--check --json" in cast(str, structured["upgrade_check_command"])

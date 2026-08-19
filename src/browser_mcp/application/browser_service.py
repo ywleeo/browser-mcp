@@ -53,7 +53,7 @@ class BrowserBridge(Protocol):
         *,
         timeout_seconds: float = 45.0,
     ) -> dict[str, Any]:
-        """Execute one namespaced read-only extension adapter action."""
+        """Execute one allowlisted namespaced extension adapter action."""
         ...
 
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:

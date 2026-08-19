@@ -1,6 +1,6 @@
 # Browser MCP 架构设计
 
-> 状态：核心架构已实现；抖音与双平台媒体下载在 `0.9.0` 完成真实插件验收
+> 状态：核心架构已实现；`0.10.0` 新增双平台期望状态式点赞/收藏，等待真实账号验收
 > 来源项目：`/Users/leeo/Code/github/ywleeo/robin`
 > 来源基线：Git `5bded8435fd105f4cbc68423ef4b93854f9a5e78`，并纳入当前工作区中对通用网页超时快照的未提交改进
 > 目标项目：`/Users/leeo/Code/github/ywleeo/browser-mcp`
@@ -16,7 +16,7 @@
 - 源码运行时使用项目根目录的固定 `extension/`，便于 GitHub 发布和开发者模式加载；wheel
   安装等无源码目录场景才释放到用户数据目录。MCP 工具始终返回实际目录和连接状态。
 - 通用网页读取与站点专用解析相互独立，新增站点不会污染 MCP、bridge 或全局模块。
-- 站点结构化工具默认只读；通用视觉交互与媒体下载采用独立工具和明确风险标记。
+- 站点结构化读取默认只读；视觉交互、媒体下载和窄站点变更工具采用独立命名空间与明确风险标记。
 - 大内容使用不可变快照分页，不依赖模型反复重新加载网页。
 
 ## 2. 非目标
@@ -26,7 +26,8 @@
 - 不迁移 Robin 的 Agent、Tauri UI、模型配置、文件工具或工作流系统。
 - 不把 Chrome extension 打包成商店发布版本；先采用开发者模式加载 unpacked extension。
 - 不提供公网 MCP 服务。首选本地 stdio，避免额外的鉴权和远程浏览器安全边界。
-- 不开放任意 JavaScript eval、任意文件上传以及点赞、评论、发帖、购买等站点写操作。
+- 不开放任意 JavaScript eval、任意文件上传以及评论、发帖、购买等高风险站点写操作；当前
+  仅提供经过站点级选择器约束、期望状态校验和单击验证的点赞/收藏窄工具。
 - 不保证所有历史站点工具在 MVP 同时可用；站点适配器在通用读取稳定后逐个迁移。
 
 ## 3. 源码审计结论
@@ -87,8 +88,8 @@ Robin 的 bridge 位于：
 | 站点/能力 | 获取机制 | Browser MCP 实现边界 |
 | --- | --- | --- |
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
-| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
-| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR | `sites/xhs.py` + `extension/background.js` |
+| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复；点赞/收藏只定位作品级 `data-e2e` 控件 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
+| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR；点赞/收藏只定位详情底栏语义图标 | `sites/xhs.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
 | 微博搜索 fallback | 直连失败时，用 Chrome 渲染 HTML 后解析 | `weibo/search.rs` → `format.rs` |
@@ -182,7 +183,11 @@ flowchart LR
 - `read`：status、navigate/read、DOM query、XHR read、站点搜索/详情解析。
 - `mutate`：click、type、upload，以及可能触发点赞、评论、发布或购买流程的动作。
 
-`page_eval` 不是普通 read 工具，即使脚本声称只读取也可以任意修改页面，因此归入 `unsafe`，后续必须由显式配置开启。MVP 只注册 `read` 工具。
+`page_eval` 不是普通 read 工具，即使脚本声称只读取也可以任意修改页面，因此归入 `unsafe`。
+站点变更工具必须使用独立 `*.mutate` 命名空间、固定 action 和平台内选择器，不开放任意 eval。
+
+点赞/收藏采用期望状态合同：先读取语义状态，状态一致直接返回 `changed=false`；不一致时最多
+发送一次可信点击，随后只轮询最终状态。无法验证时返回错误且不重试，避免切换型 UI 被双击。
 
 ### ADR-004：采集、整形、呈现分层
 
@@ -326,6 +331,10 @@ class SiteAdapter(Protocol):
 下载器逐跳校验重定向、限制单文件大小、拒绝 HTML/JSON 伪响应，并通过同目录 `.part`
 文件原子发布；共享层不理解小红书或抖音的页面结构、签名和评论逻辑。
 
+点赞与收藏也保持平台隔离：对外是四个窄工具，内部共享层只负责 allowlist、请求关联和一次性
+可信点击，不理解任何平台 selector。小红书的 `#like/#liked`、`#collect/#collected` 与抖音的
+`data-e2e-state` 判定全部留在各自扩展 adapter 中。
+
 ## 7. MCP 工具面
 
 ### MVP 工具
@@ -352,10 +361,11 @@ MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
 - 第四批站点：抖音、淘宝、微博。
 - 其他 HTTP-backed 站点（如 Bilibili、网易云）不抢占上述业务顺序。
 
-### 暂缓的可变更工具族
+### 可变更工具族
 
 - page click / type / upload。
-- 站点点赞、评论、发布等显式 action。
+- 已实现：小红书与抖音的点赞/收藏期望状态工具；调用前需确认，固定 action，单击后验证。
+- 暂缓：站点评论、发布、购买等显式 action。
 - 任意 JS eval（单独 unsafe 开关，默认永久关闭也可接受）。
 
 ## 8. 生命周期与并发

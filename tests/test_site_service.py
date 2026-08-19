@@ -19,6 +19,7 @@ from browser_mcp.sites.models import (
     DouyinDownloadRequest,
     DouyinSearchRequest,
     DouyinVideoRequest,
+    SiteEngagementRequest,
     SitePageRequest,
     WebSearchRequest,
     XhsCommentsRequest,
@@ -244,6 +245,89 @@ async def test_douyin_tools_use_their_isolated_extension_namespace(tmp_path: Pat
         ("douyin.fetch", "comments"),
     ]
     assert bridge.site_requests[2][2]["maxComments"] == 123
+
+
+@pytest.mark.asyncio
+async def test_engagement_tools_set_desired_state_through_mutation_namespaces(
+    tmp_path: Path,
+) -> None:
+    """Each platform should isolate mutations and preserve idempotent desired-state input."""
+    bridge = FakeBridge(tmp_path / "extension")
+    xhs_url = "https://www.xiaohongshu.com/explore/n1?xsec_token=a%2Bb&xsec_source=pc_search"
+    douyin_url = "https://www.douyin.com/video/7478048831087725875"
+    for action, enabled in (("like", True), ("collect", False)):
+        bridge.site_responses[("xhs.mutate", action)] = {
+            "platform": "xhs",
+            "post_id": "n1",
+            "action": action,
+            "requested_state": enabled,
+            "active": enabled,
+            "changed": True,
+            "url": xhs_url,
+        }
+        bridge.site_responses[("douyin.mutate", action)] = {
+            "platform": "douyin",
+            "post_id": "7478048831087725875",
+            "action": action,
+            "requested_state": enabled,
+            "active": enabled,
+            "changed": False,
+            "url": douyin_url,
+        }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    xhs_like = await service.xhs_like(
+        SiteEngagementRequest.model_validate({"url": xhs_url, "enabled": True})
+    )
+    xhs_collect = await service.xhs_collect(
+        SiteEngagementRequest.model_validate({"url": xhs_url, "enabled": False})
+    )
+    douyin_like = await service.douyin_like(
+        SiteEngagementRequest.model_validate({"url": douyin_url, "enabled": True})
+    )
+    douyin_collect = await service.douyin_collect(
+        SiteEngagementRequest.model_validate({"url": douyin_url, "enabled": False})
+    )
+
+    assert (xhs_like.active, xhs_collect.active) == (True, False)
+    assert (douyin_like.changed, douyin_collect.changed) == (False, False)
+    assert bridge.site_requests == [
+        (
+            "xhs.mutate",
+            "like",
+            {
+                "noteId": "n1",
+                "xsecToken": "a+b",
+                "xsecSource": "pc_search",
+                "enabled": True,
+            },
+        ),
+        (
+            "xhs.mutate",
+            "collect",
+            {
+                "noteId": "n1",
+                "xsecToken": "a+b",
+                "xsecSource": "pc_search",
+                "enabled": False,
+            },
+        ),
+        (
+            "douyin.mutate",
+            "like",
+            {"awemeId": "7478048831087725875", "pageKind": "video", "enabled": True},
+        ),
+        (
+            "douyin.mutate",
+            "collect",
+            {"awemeId": "7478048831087725875", "pageKind": "video", "enabled": False},
+        ),
+    ]
 
 
 @pytest.mark.asyncio

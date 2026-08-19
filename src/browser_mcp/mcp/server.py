@@ -47,6 +47,8 @@ from browser_mcp.sites.models import (
     RedditSearchResult,
     RedditSearchSort,
     SiteDocumentResult,
+    SiteEngagementRequest,
+    SiteEngagementResult,
     SiteLoginStatus,
     SitePageRequest,
     SitePlatform,
@@ -281,6 +283,16 @@ def create_server(
         request = XhsNoteRequest.model_validate({"url": url})
         return await websites.xhs_note(request)
 
+    async def _xhs_like(url: str, enabled: bool = True) -> SiteEngagementResult:
+        """Set one Xiaohongshu note's desired like state and verify the result."""
+        request = SiteEngagementRequest.model_validate({"url": url, "enabled": enabled})
+        return await websites.xhs_like(request)
+
+    async def _xhs_collect(url: str, enabled: bool = True) -> SiteEngagementResult:
+        """Set one Xiaohongshu note's desired collection state and verify the result."""
+        request = SiteEngagementRequest.model_validate({"url": url, "enabled": enabled})
+        return await websites.xhs_collect(request)
+
     async def _xhs_download(
         url: str,
         media: MediaSelection = MediaSelection.ALL,
@@ -321,6 +333,16 @@ def create_server(
         """Read one canonical Douyin video or image-post URL."""
         request = DouyinVideoRequest.model_validate({"url": url})
         return await websites.douyin_video(request)
+
+    async def _douyin_like(url: str, enabled: bool = True) -> SiteEngagementResult:
+        """Set one Douyin post's desired like state and verify the result."""
+        request = SiteEngagementRequest.model_validate({"url": url, "enabled": enabled})
+        return await websites.douyin_like(request)
+
+    async def _douyin_collect(url: str, enabled: bool = True) -> SiteEngagementResult:
+        """Set one Douyin post's desired collection state and verify the result."""
+        request = SiteEngagementRequest.model_validate({"url": url, "enabled": enabled})
+        return await websites.douyin_collect(request)
 
     async def _douyin_download(
         url: str,
@@ -600,6 +622,38 @@ def create_server(
         structured_output=True,
     )
     server.add_tool(
+        _xhs_like,
+        name="xhs_like",
+        description=(
+            "Set the desired like state for one Xiaohongshu note in the logged-in account. "
+            "This changes external account state, so obtain explicit user confirmation "
+            "immediately before calling. Repeated calls with the same enabled value are no-ops."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _xhs_collect,
+        name="xhs_collect",
+        description=(
+            "Set the desired collection state for one Xiaohongshu note in the logged-in account. "
+            "This changes external account state, so obtain explicit user confirmation "
+            "immediately before calling. Repeated calls with the same enabled value are no-ops."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
         _xhs_download,
         name="xhs_download",
         description=(
@@ -668,6 +722,38 @@ def create_server(
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_like,
+        name="douyin_like",
+        description=(
+            "Set the desired like state for one Douyin post in the logged-in account. "
+            "This changes external account state, so obtain explicit user confirmation "
+            "immediately before calling. Repeated calls with the same enabled value are no-ops."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_collect,
+        name="douyin_collect",
+        description=(
+            "Set the desired collection state for one Douyin post in the logged-in account. "
+            "This changes external account state, so obtain explicit user confirmation "
+            "immediately before calling. Repeated calls with the same enabled value are no-ops."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
             idempotent_hint=True,
             open_world_hint=True,
         ),

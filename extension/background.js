@@ -177,8 +177,12 @@ function connectPort(port, config) {
       void dispatchZhihuFetch(state, message);
     } else if (message.type === "xhs.fetch") {
       void dispatchXhsFetch(state, message);
+    } else if (message.type === "xhs.mutate") {
+      void dispatchXhsMutation(state, message);
     } else if (message.type === "douyin.fetch") {
       void dispatchDouyinFetch(state, message);
+    } else if (message.type === "douyin.mutate") {
+      void dispatchDouyinMutation(state, message);
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -1264,6 +1268,78 @@ async function runZhihuInvitations(state, args, reply) {
   }
 }
 
+/** Dispatch one trusted click at an already validated viewport point without retrying it. */
+async function dispatchTrustedPointClick(debugTarget, point) {
+  const position = { x: Number(point.x), y: Number(point.y) };
+  await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    button: "none",
+    buttons: 0,
+    ...position,
+  });
+  await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    ...position,
+  });
+  await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    ...position,
+  });
+}
+
+/** Read one site control in the page's MAIN world and retain its marker diagnostics. */
+async function readEngagementControl(tabId, reader, action) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [action],
+    func: reader,
+  });
+  return result || { error: "engagement control script returned no data" };
+}
+
+/** Wait until hydration exposes the same valid engagement state twice in succession. */
+async function waitForStableEngagementControl(tabId, reader, action, platform) {
+  let previous = null;
+  let last = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    last = await readEngagementControl(tabId, reader, action);
+    if (!last.error) {
+      if (
+        previous
+        && previous.active === last.active
+        && previous.stateMarker === last.stateMarker
+      ) {
+        return last;
+      }
+      previous = last;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  throw new Error(last?.error || `${platform} ${action} control did not stabilize`);
+}
+
+/** Poll only for verification after one click; never resend a mutation. */
+async function waitForEngagementState(tabId, reader, action, expected, platform) {
+  let last = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    last = await readEngagementControl(tabId, reader, action);
+    if (!last.error && last.active === expected) return last;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  const marker = last?.stateMarker || last?.error || "unknown";
+  throw new Error(
+    `${platform} ${action} click was sent once but final state was not verified (${marker}); `
+      + "the click was not retried",
+  );
+}
+
 /** Dispatch one Xiaohongshu read adapter without exposing generic page mutation. */
 async function dispatchXhsFetch(state, message) {
   const reply = (payload) =>
@@ -1278,6 +1354,143 @@ async function dispatchXhsFetch(state, message) {
     await runXhsUserNotes(state, message.args || {}, reply);
   } else {
     reply({ ok: false, error: `unsupported xhs action: ${message.action}` });
+  }
+}
+
+/** Return one visible XHS note-level engagement control and its semantic icon state. */
+function readXhsEngagementControl(action) {
+  const contract = action === "like"
+    ? { selector: ".like-wrapper", inactive: "#like", active: "#liked" }
+    : action === "collect"
+      ? { selector: ".collect-wrapper", inactive: "#collect", active: "#collected" }
+      : null;
+  if (!contract) return { error: `unsupported XHS engagement action: ${action}` };
+  const candidates = Array.from(document.querySelectorAll(
+    `.interact-container .buttons.engage-bar-style ${contract.selector}`,
+  )).filter((element) => {
+    if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  const control = candidates.at(-1);
+  if (!(control instanceof HTMLElement)) {
+    return { error: `XHS note-level ${action} control was not found` };
+  }
+  control.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  const iconUse = control.querySelector("svg use");
+  const marker = iconUse?.getAttribute("href") || iconUse?.getAttribute("xlink:href") || "";
+  if (marker !== contract.inactive && marker !== contract.active) {
+    return { error: `XHS ${action} control exposed an unknown state marker: ${marker || "empty"}` };
+  }
+  const rect = control.getBoundingClientRect();
+  return {
+    action,
+    active: marker === contract.active,
+    stateMarker: marker,
+    point: {
+      x: Math.max(1, Math.min(innerWidth - 1, Math.round(rect.left + rect.width / 2))),
+      y: Math.max(1, Math.min(innerHeight - 1, Math.round(rect.top + rect.height / 2))),
+    },
+  };
+}
+
+/** Dispatch one allowlisted XHS account mutation through a dedicated namespace. */
+async function dispatchXhsMutation(state, message) {
+  const reply = (payload) =>
+    sendJson(state, { type: "xhs.mutate.result", id: message.id, ...payload });
+  if (message.action !== "like" && message.action !== "collect") {
+    reply({ ok: false, error: `unsupported xhs mutation: ${message.action}` });
+    return;
+  }
+  await runXhsMutation(state, message.action, message.args || {}, reply);
+}
+
+/** Set one XHS engagement control to its requested state with at most one trusted click. */
+async function runXhsMutation(state, action, args, reply) {
+  const noteId = String(args.noteId || "").trim();
+  if (!noteId) {
+    reply({ ok: false, error: "xhs noteId is required" });
+    return;
+  }
+  const enabled = args.enabled !== false;
+  const xsecToken = String(args.xsecToken || "");
+  const xsecSource = String(args.xsecSource || "pc_search");
+  const target = new URL(`https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`);
+  if (xsecToken) target.searchParams.set("xsec_token", xsecToken);
+  if (xsecSource) target.searchParams.set("xsec_source", xsecSource);
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+
+  let tabId = null;
+  let debugTarget = null;
+  try {
+    const tab = await chrome.tabs.create({
+      url: "https://www.xiaohongshu.com/explore",
+      active: false,
+    });
+    tabId = tab.id;
+    if (tabId == null) throw new Error("Chrome did not create an XHS engagement tab");
+    await waitForTabComplete(tabId);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const before = await waitForStableEngagementControl(
+      tabId,
+      readXhsEngagementControl,
+      action,
+      "XHS",
+    );
+    if (before.active === enabled) {
+      reply({
+        ok: true,
+        data: {
+          platform: "xhs",
+          post_id: noteId,
+          action,
+          requested_state: enabled,
+          active: before.active,
+          changed: false,
+          url: target.toString(),
+        },
+      });
+      return;
+    }
+
+    debugTarget = { tabId };
+    await chrome.debugger.attach(debugTarget, "1.3");
+    try {
+      await dispatchTrustedPointClick(debugTarget, before.point);
+    } finally {
+      await chrome.debugger.detach(debugTarget).catch(() => {});
+      debugTarget = null;
+    }
+    const after = await waitForEngagementState(
+      tabId,
+      readXhsEngagementControl,
+      action,
+      enabled,
+      "XHS",
+    );
+    reply({
+      ok: true,
+      data: {
+        platform: "xhs",
+        post_id: noteId,
+        action,
+        requested_state: enabled,
+        active: after.active,
+        changed: true,
+        url: target.toString(),
+      },
+    });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (debugTarget) await chrome.debugger.detach(debugTarget).catch(() => {});
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
   }
 }
 
@@ -1886,6 +2099,140 @@ async function dispatchDouyinFetch(state, message) {
   }
 }
 
+/** Return one visible Douyin post-level engagement control and its e2e state marker. */
+function readDouyinEngagementControl(action) {
+  const contract = action === "like"
+    ? { selector: '[data-e2e="video-player-digg"]', inactive: "video-player-no-digged" }
+    : action === "collect"
+      ? { selector: '[data-e2e="video-player-collect"]', inactive: "video-player-no-collect" }
+      : null;
+  if (!contract) return { error: `unsupported Douyin engagement action: ${action}` };
+  const candidates = Array.from(document.querySelectorAll(contract.selector)).filter((element) => {
+    if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  const control = candidates.find((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+  }) || candidates.at(-1);
+  if (!(control instanceof HTMLElement)) {
+    return { error: `Douyin post-level ${action} control was not found` };
+  }
+  control.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  const marker = String(control.getAttribute("data-e2e-state") || "");
+  const activeMarker = action === "like" ? /digged/.test(marker) : /collect/.test(marker);
+  if (!marker || (marker !== contract.inactive && !activeMarker)) {
+    return {
+      error: `Douyin ${action} control exposed an unknown state marker: ${marker || "empty"}`,
+    };
+  }
+  const rect = control.getBoundingClientRect();
+  return {
+    action,
+    active: marker !== contract.inactive,
+    stateMarker: marker,
+    point: {
+      x: Math.max(1, Math.min(innerWidth - 1, Math.round(rect.left + rect.width / 2))),
+      y: Math.max(1, Math.min(innerHeight - 1, Math.round(rect.top + rect.height / 2))),
+    },
+  };
+}
+
+/** Dispatch one allowlisted Douyin account mutation through a dedicated namespace. */
+async function dispatchDouyinMutation(state, message) {
+  const reply = (payload) =>
+    sendJson(state, { type: "douyin.mutate.result", id: message.id, ...payload });
+  if (message.action !== "like" && message.action !== "collect") {
+    reply({ ok: false, error: `unsupported douyin mutation: ${message.action}` });
+    return;
+  }
+  await runDouyinMutation(state, message.action, message.args || {}, reply);
+}
+
+/** Set one Douyin engagement control to its requested state with at most one trusted click. */
+async function runDouyinMutation(state, action, args, reply) {
+  const awemeId = String(args.awemeId || "").trim();
+  const pageKind = String(args.pageKind || "video") === "note" ? "note" : "video";
+  if (!/^\d+$/.test(awemeId)) {
+    reply({ ok: false, error: "douyin awemeId must contain digits only" });
+    return;
+  }
+  const enabled = args.enabled !== false;
+  const target = new URL(`https://www.douyin.com/${pageKind}/${awemeId}`);
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+
+  let tabId = null;
+  let debugTarget = null;
+  try {
+    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
+    tabId = tab.id;
+    if (tabId == null) throw new Error("Chrome did not create a Douyin engagement tab");
+    await waitForTabComplete(tabId);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const before = await waitForStableEngagementControl(
+      tabId,
+      readDouyinEngagementControl,
+      action,
+      "Douyin",
+    );
+    if (before.active === enabled) {
+      reply({
+        ok: true,
+        data: {
+          platform: "douyin",
+          post_id: awemeId,
+          action,
+          requested_state: enabled,
+          active: before.active,
+          changed: false,
+          url: target.toString(),
+        },
+      });
+      return;
+    }
+
+    debugTarget = { tabId };
+    await chrome.debugger.attach(debugTarget, "1.3");
+    try {
+      await dispatchTrustedPointClick(debugTarget, before.point);
+    } finally {
+      await chrome.debugger.detach(debugTarget).catch(() => {});
+      debugTarget = null;
+    }
+    const after = await waitForEngagementState(
+      tabId,
+      readDouyinEngagementControl,
+      action,
+      enabled,
+      "Douyin",
+    );
+    reply({
+      ok: true,
+      data: {
+        platform: "douyin",
+        post_id: awemeId,
+        action,
+        requested_state: enabled,
+        active: after.active,
+        changed: true,
+        url: target.toString(),
+      },
+    });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (debugTarget) await chrome.debugger.detach(debugTarget).catch(() => {});
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 /** Return whether one observed response is the signed endpoint required by a read action. */
 function matchesDouyinRead(kind, url) {
   if (kind === "search") {
@@ -2215,35 +2562,12 @@ function douyinReplyStreamsComplete(progress) {
 
 /** Click one reply expander with a trusted Chrome input event. */
 async function clickDouyinReplyExpander(debugTarget, point) {
-  const click = async () => {
-    const position = { x: Number(point.x), y: Number(point.y) };
-    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      button: "none",
-      buttons: 0,
-      ...position,
-    });
-    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-      ...position,
-    });
-    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-      ...position,
-    });
-  };
   try {
-    await click();
+    await dispatchTrustedPointClick(debugTarget, point);
   } catch (firstError) {
     if (!/not attached/i.test(String(firstError?.message || firstError))) throw firstError;
     await chrome.debugger.attach(debugTarget, "1.3");
-    await click();
+    await dispatchTrustedPointClick(debugTarget, point);
   }
 }
 

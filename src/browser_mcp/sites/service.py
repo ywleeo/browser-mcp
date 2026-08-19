@@ -36,6 +36,9 @@ from browser_mcp.sites.models import (
     RedditSearchRequest,
     RedditSearchResult,
     SiteDocumentResult,
+    SiteEngagementAction,
+    SiteEngagementRequest,
+    SiteEngagementResult,
     SiteLoginStatus,
     SitePageRequest,
     SitePlatform,
@@ -196,6 +199,41 @@ class SiteService:
         )
         return shape_xhs_note(raw, identity)
 
+    async def xhs_like(self, request: SiteEngagementRequest) -> SiteEngagementResult:
+        """Set and verify the desired like state for one Xiaohongshu note."""
+        return await self._xhs_engagement(request, SiteEngagementAction.LIKE)
+
+    async def xhs_collect(self, request: SiteEngagementRequest) -> SiteEngagementResult:
+        """Set and verify the desired collection state for one Xiaohongshu note."""
+        return await self._xhs_engagement(request, SiteEngagementAction.COLLECT)
+
+    async def _xhs_engagement(
+        self,
+        request: SiteEngagementRequest,
+        action: SiteEngagementAction,
+    ) -> SiteEngagementResult:
+        """Dispatch one idempotent Xiaohongshu account mutation and validate its identity."""
+        identity = parse_xhs_note_url(str(request.url))
+        await self._require_login(SitePlatform.XHS)
+        raw = await self._browser.gateway.request(
+            "xhs.mutate",
+            action.value,
+            {
+                "noteId": identity.note_id,
+                "xsecToken": identity.xsec_token,
+                "xsecSource": identity.xsec_source,
+                "enabled": request.enabled,
+            },
+            timeout_seconds=45.0,
+        )
+        return self._validate_engagement_result(
+            raw,
+            platform=SitePlatform.XHS,
+            post_id=identity.note_id,
+            action=action,
+            requested_state=request.enabled,
+        )
+
     async def xhs_download(self, request: XhsDownloadRequest) -> MediaDownloadResult:
         """Resolve one XHS note through Chrome and download its selected media files."""
         note = await self.xhs_note(XhsNoteRequest(url=request.url))
@@ -276,6 +314,40 @@ class SiteService:
         )
         return shape_douyin_video(raw, identity)
 
+    async def douyin_like(self, request: SiteEngagementRequest) -> SiteEngagementResult:
+        """Set and verify the desired like state for one Douyin post."""
+        return await self._douyin_engagement(request, SiteEngagementAction.LIKE)
+
+    async def douyin_collect(self, request: SiteEngagementRequest) -> SiteEngagementResult:
+        """Set and verify the desired collection state for one Douyin post."""
+        return await self._douyin_engagement(request, SiteEngagementAction.COLLECT)
+
+    async def _douyin_engagement(
+        self,
+        request: SiteEngagementRequest,
+        action: SiteEngagementAction,
+    ) -> SiteEngagementResult:
+        """Dispatch one idempotent Douyin account mutation and validate its identity."""
+        identity = parse_douyin_aweme_url(str(request.url))
+        await self._require_login(SitePlatform.DOUYIN)
+        raw = await self._browser.gateway.request(
+            "douyin.mutate",
+            action.value,
+            {
+                "awemeId": identity.aweme_id,
+                "pageKind": identity.page_kind,
+                "enabled": request.enabled,
+            },
+            timeout_seconds=45.0,
+        )
+        return self._validate_engagement_result(
+            raw,
+            platform=SitePlatform.DOUYIN,
+            post_id=identity.aweme_id,
+            action=action,
+            requested_state=request.enabled,
+        )
+
     async def douyin_download(self, request: DouyinDownloadRequest) -> MediaDownloadResult:
         """Resolve one Douyin post through Chrome and download its selected media files."""
         post = await self.douyin_video(DouyinVideoRequest(url=request.url))
@@ -317,6 +389,29 @@ class SiteService:
             timeout_seconds=180.0,
         )
         return shape_douyin_comments(raw, identity, request)
+
+    @staticmethod
+    def _validate_engagement_result(
+        raw: dict[str, object],
+        *,
+        platform: SitePlatform,
+        post_id: str,
+        action: SiteEngagementAction,
+        requested_state: bool,
+    ) -> SiteEngagementResult:
+        """Fail closed when an extension mutation reply does not match its requested target."""
+        result = SiteEngagementResult.model_validate(raw)
+        expected = (platform, post_id, action, requested_state, requested_state)
+        actual = (
+            result.platform,
+            result.post_id,
+            result.action,
+            result.requested_state,
+            result.active,
+        )
+        if actual != expected:
+            raise ValueError("site engagement reply did not verify the requested final state")
+        return result
 
     async def google_search(self, request: WebSearchRequest) -> WebSearchResult:
         """Search Google through rendered Chrome results."""

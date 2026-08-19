@@ -190,8 +190,14 @@ class BridgeManager:
         *,
         timeout_seconds: float = 45.0,
     ) -> dict[str, Any]:
-        """Send a namespaced read-only adapter action through the authenticated extension."""
-        if message_type not in {"douyin.fetch", "zhihu.fetch", "xhs.fetch"}:
+        """Send one allowlisted site adapter action through the authenticated extension."""
+        if message_type not in {
+            "douyin.fetch",
+            "douyin.mutate",
+            "zhihu.fetch",
+            "xhs.fetch",
+            "xhs.mutate",
+        }:
             raise ValueError(f"unsupported extension action namespace: {message_type}")
         return await self._request(
             message_type,
@@ -286,8 +292,10 @@ class BridgeManager:
             "browser.fetch.result",
             "browser.interact.result",
             "douyin.fetch.result",
+            "douyin.mutate.result",
             "zhihu.fetch.result",
             "xhs.fetch.result",
+            "xhs.mutate.result",
         }:
             self._resolve_request(typed_message)
         elif message_type == "browser.url_check":
