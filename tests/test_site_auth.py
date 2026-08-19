@@ -106,3 +106,30 @@ def test_unknown_login_state_is_fail_closed() -> None:
     assert status.state is SiteLoginState.UNKNOWN
     with pytest.raises(SiteLoginRequiredError, match="无法确认"):
         require_site_login(status)
+
+
+def test_xhs_detects_current_rendered_profile_after_logged_in_flag_was_removed() -> None:
+    """The exact rendered “我” profile link should remain a positive XHS identity signal."""
+    status = parse_site_login_status(
+        SitePlatform.XHS,
+        '<script>window.__INITIAL_STATE__={"user":{"showLogin":false}}</script>'
+        '<a href="/user/profile/current-user?xsec_source=pc_feed"><span> 我 </span></a>',
+        "https://www.xiaohongshu.com/explore",
+    )
+
+    assert status.state is SiteLoginState.LOGGED_IN
+    assert status.logged_in is True
+    assert status.account_label == "current-user"
+
+
+def test_xhs_does_not_treat_feed_author_profiles_as_the_current_account() -> None:
+    """Ordinary author links must not bypass the fail-closed XHS login gate."""
+    status = parse_site_login_status(
+        SitePlatform.XHS,
+        '<script>window.__INITIAL_STATE__={"user":{"showLogin":false}}</script>'
+        '<a href="/user/profile/feed-author">作者昵称</a><span>我</span>',
+        "https://www.xiaohongshu.com/explore",
+    )
+
+    assert status.state is SiteLoginState.UNKNOWN
+    assert status.logged_in is False

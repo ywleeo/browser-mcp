@@ -103,22 +103,31 @@ def _zhihu_status(html: str) -> tuple[SiteLoginState, str]:
 
 
 def _xhs_status(html: str) -> tuple[SiteLoginState, str]:
-    """Read Xiaohongshu's explicit loggedIn flag and current account metadata."""
+    """Read Xiaohongshu's legacy flag or its rendered current-account navigation link."""
     match = re.search(
         r"window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\})\s*;?\s*(?:</script>|\n)",
         html,
     )
-    if match is None:
-        return SiteLoginState.UNKNOWN, ""
-    data = _json_object(re.sub(r":\s*undefined\b", ": null", match.group(1)))
-    user = _object(data.get("user"))
-    logged_in = user.get("loggedIn")
-    info = _object(user.get("userInfo"))
-    account = _string(info.get("nickname")) or _string(info.get("userId"))
-    if logged_in is True:
-        return SiteLoginState.LOGGED_IN, account
-    if logged_in is False:
-        return SiteLoginState.LOGGED_OUT, ""
+    if match is not None:
+        data = _json_object(re.sub(r":\s*undefined\b", ": null", match.group(1)))
+        user = _object(data.get("user"))
+        logged_in = user.get("loggedIn")
+        info = _object(user.get("userInfo"))
+        account = _string(info.get("nickname")) or _string(info.get("userId"))
+        if logged_in is True:
+            return SiteLoginState.LOGGED_IN, account
+        if logged_in is False:
+            return SiteLoginState.LOGGED_OUT, ""
+
+    root = parse_rendered_html(html)
+    profile = first_node(
+        root,
+        "//a[starts-with(@href, '/user/profile/') and normalize-space(string(.))='我']",
+    )
+    profile_path = attribute(profile, "href")
+    identity = re.match(r"^/user/profile/([^/?#]+)", profile_path)
+    if identity is not None:
+        return SiteLoginState.LOGGED_IN, identity.group(1)
     return SiteLoginState.UNKNOWN, ""
 
 
