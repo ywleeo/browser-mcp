@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from browser_mcp.sites.models import XhsSearchRequest, XhsSort, XhsUserNotesRequest
+from browser_mcp.sites.models import (
+    XhsCommentsRequest,
+    XhsSearchRequest,
+    XhsSort,
+    XhsUserNotesRequest,
+)
 from browser_mcp.sites.xhs import (
     XhsParseError,
     parse_xhs_note_url,
+    shape_xhs_comments,
     shape_xhs_note,
     shape_xhs_search,
     shape_xhs_user_notes,
@@ -178,3 +184,79 @@ def test_shape_xhs_user_notes_merges_pages_and_deduplicates_notes() -> None:
     assert result.items[1].cover == "https://img.example/2.jpg"
     assert result.items[1].published_at == "2023-11-16"
     assert "xsec_source=pc_user" in result.items[1].url
+
+
+def test_shape_xhs_comments_flattens_replies_and_deduplicates_pages() -> None:
+    """Root pages and expanded reply pages should form one stable flat thread."""
+    request = XhsCommentsRequest.model_validate(
+        {
+            "url": "https://www.xiaohongshu.com/explore/n1?xsec_token=token&xsec_source=pc_search",
+            "max_comments": 20,
+        }
+    )
+    identity = parse_xhs_note_url(str(request.url))
+    reply = {
+        "id": "c2",
+        "content": "首条回复",
+        "create_time": 1_700_000_001,
+        "user_info": {"user_id": "u2", "nickname": "回复者"},
+        "target_comment": {"id": "c1", "user_info": {"nickname": "作者"}},
+    }
+    raw = {
+        "expected_count": 3,
+        "complete": True,
+        "scrolls": 4,
+        "pages": [
+            {
+                "kind": "root",
+                "payload": {
+                    "data": {
+                        "has_more": False,
+                        "comments": [
+                            {
+                                "id": "c1",
+                                "content": "顶层评论",
+                                "create_time": 1_700_000_000,
+                                "ip_location": "上海",
+                                "liked_count": "12",
+                                "sub_comment_count": 2,
+                                "user_info": {"user_id": "u1", "nickname": "作者"},
+                                "sub_comments": [reply],
+                            }
+                        ],
+                    }
+                },
+            },
+            {
+                "kind": "sub",
+                "root_comment_id": "c1",
+                "payload": {
+                    "data": {
+                        "comments": [
+                            reply,
+                            {
+                                "id": "c3",
+                                "content": "第二条回复",
+                                "create_time": 1_700_000_002_000,
+                                "user_info": {"user_id": "u3", "nickname": "另一人"},
+                                "target_comment": {
+                                    "id": "c2",
+                                    "user_info": {"nickname": "回复者"},
+                                },
+                            },
+                        ]
+                    }
+                },
+            },
+        ],
+    }
+
+    result = shape_xhs_comments(raw, identity, request)
+
+    assert result.complete is True
+    assert result.fetched == 3
+    assert [comment.comment_id for comment in result.items] == ["c1", "c2", "c3"]
+    assert result.items[1].root_comment_id == "c1"
+    assert result.items[2].parent_comment_id == "c2"
+    assert result.items[2].reply_to == "回复者"
+    assert result.items[1].published_at_ms == 1_700_000_001_000

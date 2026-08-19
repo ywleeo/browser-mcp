@@ -24,6 +24,8 @@ from browser_mcp.sites.models import (
     SitePlatform,
     WebSearchRequest,
     WebSearchResult,
+    XhsCommentsRequest,
+    XhsCommentsResult,
     XhsNoteRequest,
     XhsNoteResult,
     XhsSearchRequest,
@@ -54,6 +56,7 @@ from browser_mcp.sites.snapshot import SiteSnapshotStore
 from browser_mcp.sites.x import parse_x_post, parse_x_post_url, parse_x_search
 from browser_mcp.sites.xhs import (
     parse_xhs_note_url,
+    shape_xhs_comments,
     shape_xhs_note,
     shape_xhs_search,
     shape_xhs_user_notes,
@@ -170,6 +173,23 @@ class SiteService:
             timeout_seconds=40.0,
         )
         return shape_xhs_note(raw, identity)
+
+    async def xhs_comments(self, request: XhsCommentsRequest) -> XhsCommentsResult:
+        """Collect comments by scrolling the note's own stream and expanding replies."""
+        identity = parse_xhs_note_url(str(request.url))
+        await self._require_login(SitePlatform.XHS)
+        raw = await self._browser.gateway.request(
+            "xhs.fetch",
+            "comments",
+            {
+                "noteId": identity.note_id,
+                "xsecToken": identity.xsec_token,
+                "xsecSource": identity.xsec_source,
+                "maxComments": request.max_comments,
+            },
+            timeout_seconds=180.0,
+        )
+        return shape_xhs_comments(raw, identity, request)
 
     async def xhs_user_notes(self, request: XhsUserNotesRequest) -> XhsUserNotesResult:
         """Read published notes for an account, defaulting to the logged-in account."""

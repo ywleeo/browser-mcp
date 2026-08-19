@@ -46,7 +46,7 @@
 | 2 | 独立 extension bridge | extension 能连接 `17880..17889`，状态可探测 |
 | 3 | Fetch MVP | 真实 Chrome 能读取静态页、JS 页、登录态页并分页 |
 | 4 | 知乎 adapter | 搜索、问题/回答/文章解析 |
-| 5 | 小红书 adapter | 搜索、笔记详情；评论读取另设子门禁 |
+| 5 | 小红书 adapter | 搜索、笔记详情、账号笔记及评论流读取 |
 | 6 | X/Twitter adapter | 搜索、帖子、回复解析 |
 | 7 | Reddit adapter | 帖子、评论、subreddit/search 列表 |
 | 8 | 搜索引擎 adapters | Google 先行，其他引擎逐个验收 |
@@ -206,7 +206,7 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
 - `xhs_search`：页面触发 signed XHR 并整形结果。
 - `xhs_note`：读取 SSR initial state。
 - `xhs_user_notes`：合并账号页 SSR 首屏和 signed `user_posted` 分页响应。
-- `xhs_comments` 作为阶段 5B：先完成单页/已加载评论，再决定是否迁移自动滚动收集全部评论。
+- `xhs_comments`：滚动详情弹层自己的 `.note-scroller`，捕获页面签名的评论分页响应，展开子评论并按评论 ID 去重。
 - 迁移 URL、shape、format fixtures；协议保留原始 JSON 与 typed output 的诊断边界。
 
 ### 5A 实现结果
@@ -219,14 +219,14 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
   signed 分页请求，返回去重后的内容列表和明确完整性标记。
 - 搜索/详情 URL、图文、视频、互动数和 service 路由均有离线回归测试。
 - 真实本地 Chrome 已完成搜索 26 条和首条图文详情读取（16 张图片）。
-- 评论仍属于阶段 5B，当前不注册半成品工具。
+- 评论工具返回完整性、数量上限、分页数和滚动次数，达到终止条件或预算时明确停止。
 
 ### 用户验收
 
 - 在已登录 Chrome 中搜索关键词。
 - 读取图文笔记和视频笔记各一条。
 - 验证标题、作者、正文、互动数、图片/视频 URL。
-- 阶段 5B 验证评论分页、去重和停止条件。
+- 持续用真实登录态回归评论分页、子评论展开、去重和停止条件。
 
 ## 9. 阶段 6：X/Twitter
 

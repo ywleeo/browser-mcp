@@ -85,7 +85,7 @@ Robin 的 bridge 位于：
 | --- | --- | --- |
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
 | 抖音 | 真实页面触发签名请求，拦截 API JSON；视频详情有专门流程 | `douyin/url.rs` → `shape.rs` → `format.rs` |
-| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论可滚动收集 | `xhs/url.rs` → `shape.rs` → `format.rs` |
+| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR | `sites/xhs.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
 | 微博搜索 fallback | 直连失败时，用 Chrome 渲染 HTML 后解析 | `weibo/search.rs` → `format.rs` |

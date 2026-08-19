@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from browser_mcp.sites.models import (
+    XhsComment,
+    XhsCommentsRequest,
+    XhsCommentsResult,
     XhsImage,
     XhsNoteResult,
     XhsSearchItem,
@@ -203,6 +206,118 @@ def shape_xhs_note(raw: dict[str, Any], identity: XhsNoteIdentity) -> XhsNoteRes
     )
 
 
+def shape_xhs_comments(
+    raw: dict[str, Any],
+    identity: XhsNoteIdentity,
+    request: XhsCommentsRequest,
+) -> XhsCommentsResult:
+    """Normalize captured comment-page responses into a deduplicated flat thread."""
+    records: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    def collect(
+        raw_comment: object,
+        *,
+        root_id: str = "",
+        parent_id: str = "",
+        depth: int = 0,
+    ) -> None:
+        """Collect one comment and its inline replies while retaining first-seen order."""
+        comment = _object(raw_comment)
+        comment_id = _string(comment.get("id")) or _string(comment.get("comment_id"))
+        if not comment_id:
+            return
+        resolved_root = root_id or _string(comment.get("root_comment_id")) or comment_id
+        target = _object(comment.get("target_comment")) or _object(comment.get("targetComment"))
+        resolved_parent = (
+            _string(comment.get("parent_comment_id"))
+            or _string(target.get("id"))
+            or parent_id
+        )
+        if resolved_root == comment_id:
+            resolved_parent = ""
+            depth = 0
+        user = _object(comment.get("user_info")) or _object(comment.get("userInfo"))
+        reply_user = _object(target.get("user_info")) or _object(target.get("userInfo"))
+        timestamp = _timestamp_milliseconds(
+            _optional_integer(comment.get("create_time") or comment.get("createTime"))
+        )
+        normalized = {
+            "comment_id": comment_id,
+            "root_comment_id": resolved_root,
+            "parent_comment_id": resolved_parent or None,
+            "depth": depth,
+            "user_id": _string(user.get("user_id")) or _string(user.get("userId")),
+            "author": _string(user.get("nickname")) or _string(user.get("nick_name")),
+            "text": _string(comment.get("content")) or _string(comment.get("text")),
+            "published_at": _format_milliseconds(timestamp),
+            "published_at_ms": timestamp,
+            "ip_location": _string(comment.get("ip_location"))
+            or _string(comment.get("ipLocation")),
+            "likes": _counter(comment.get("like_count") or comment.get("liked_count")),
+            "reply_count": _integer(
+                comment.get("sub_comment_count") or comment.get("subCommentCount")
+            ),
+            "reply_to": _string(reply_user.get("nickname")) or _string(reply_user.get("nick_name")),
+        }
+        existing = records.get(comment_id)
+        if existing is None:
+            records[comment_id] = normalized
+            order.append(comment_id)
+        else:
+            records[comment_id] = {
+                key: value if value not in {"", None, 0} else existing.get(key, value)
+                for key, value in normalized.items()
+            }
+
+        raw_replies = comment.get("sub_comments") or comment.get("subComments")
+        replies = cast(list[object], raw_replies) if isinstance(raw_replies, list) else []
+        for reply in replies:
+            collect(
+                reply,
+                root_id=resolved_root,
+                parent_id=comment_id,
+                depth=depth + 1,
+            )
+
+    raw_pages = raw.get("pages")
+    pages = cast(list[object], raw_pages) if isinstance(raw_pages, list) else []
+    for raw_page in pages:
+        page = _object(raw_page)
+        payload = _object(page.get("payload"))
+        data = _object(payload.get("data")) or payload
+        raw_comments = data.get("comments") or data.get("comment_list")
+        comments = cast(list[object], raw_comments) if isinstance(raw_comments, list) else []
+        page_root_id = _string(page.get("root_comment_id"))
+        is_sub_page = _string(page.get("kind")) == "sub"
+        for raw_comment in comments:
+            collect(
+                raw_comment,
+                root_id=page_root_id if is_sub_page else "",
+                parent_id=page_root_id if is_sub_page else "",
+                depth=1 if is_sub_page else 0,
+            )
+
+    limit_reached = raw.get("limit_reached") is True or len(order) > request.max_comments
+    selected_ids = order[: request.max_comments]
+    items = tuple(
+        XhsComment(index=index, **records[comment_id])
+        for index, comment_id in enumerate(selected_ids, start=1)
+    )
+    total = _optional_integer(raw.get("expected_count"))
+    return XhsCommentsResult(
+        note_id=identity.note_id,
+        url=_build_note_url(identity.note_id, identity.xsec_token, identity.xsec_source),
+        total=total if total is not None and total >= 0 else None,
+        fetched=len(items),
+        complete=raw.get("complete") is True and not limit_reached,
+        limit_reached=limit_reached,
+        pages_fetched=len(pages),
+        scrolls=_optional_integer(raw.get("scrolls")) or 0,
+        items=items,
+    )
+
+
 def _video_url(note: dict[str, Any]) -> str | None:
     """Select the first master URL across XHS video codec variants."""
     stream = _object(_object(_object(note.get("video")).get("media")).get("stream"))
@@ -284,6 +399,18 @@ def _optional_integer(value: object) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _integer(value: object) -> int:
+    """Normalize an integer-like JSON value while rejecting booleans."""
+    return _optional_integer(value) or 0
+
+
+def _timestamp_milliseconds(value: int | None) -> int | None:
+    """Normalize XHS comment timestamps that may use seconds or milliseconds."""
+    if value is None or value <= 0:
+        return None
+    return value * 1000 if value < 10_000_000_000 else value
 
 
 def _string(value: object) -> str:

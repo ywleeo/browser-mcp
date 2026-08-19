@@ -42,6 +42,8 @@ from browser_mcp.sites.models import (
     SitePlatform,
     WebSearchRequest,
     WebSearchResult,
+    XhsCommentsRequest,
+    XhsCommentsResult,
     XhsNoteRequest,
     XhsNoteResult,
     XhsSearchRequest,
@@ -264,6 +266,11 @@ def create_server(
         """Read one Xiaohongshu note URL returned by search or copied from Chrome."""
         request = XhsNoteRequest.model_validate({"url": url})
         return await websites.xhs_note(request)
+
+    async def _xhs_comments(url: str, max_comments: int = 500) -> XhsCommentsResult:
+        """Collect top-level comments and replies from one Xiaohongshu note."""
+        request = XhsCommentsRequest.model_validate({"url": url, "max_comments": max_comments})
+        return await websites.xhs_comments(request)
 
     async def _xhs_user_notes(
         user_id: str | None = None,
@@ -520,6 +527,21 @@ def create_server(
         _xhs_note,
         name="xhs_note",
         description="Read one Xiaohongshu explore-note URL with its xsec access parameters.",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _xhs_comments,
+        name="xhs_comments",
+        description=(
+            "Collect Xiaohongshu comments and replies by scrolling the note's own comment "
+            "stream; returns completeness and limit metadata."
+        ),
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,

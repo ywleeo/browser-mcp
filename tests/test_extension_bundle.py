@@ -44,6 +44,13 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert 'new InputEvent("input"' in background
     assert 'referenceAttribute = "data-browser-mcp-ref"' in background
     assert "crypto.randomUUID().slice(0, 8)" in background
+    assert 'document.querySelector(".note-scroller")' in background
+    assert 'type: "mouseWheel"' in background
+    assert "scrollerRect.left + scrollerRect.width / 2" in background
+    assert "wheelDelta * scrollDirection" in background
+    assert "if (ui.clicked === 0)" in background
+    assert "scroller.scrollTop = scroller.scrollHeight" not in background
+    assert 'message.action === "comments"' in background
 
     if os.name != "nt":
         token_mode = (tmp_path / "pairing-token").stat().st_mode & 0o777

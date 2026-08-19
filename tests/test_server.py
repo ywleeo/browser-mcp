@@ -44,6 +44,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "zhihu_invitations",
         "xhs_search",
         "xhs_note",
+        "xhs_comments",
         "xhs_user_notes",
         "x_search",
         "x_post",

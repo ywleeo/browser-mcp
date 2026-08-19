@@ -420,3 +420,43 @@ class XhsNoteResult(BaseModel):
     comments: str
     images: tuple[XhsImage, ...]
     video_url: str | None
+
+
+class XhsCommentsRequest(BaseModel):
+    """Validated request for comments loaded by one Xiaohongshu note page."""
+
+    url: HttpUrl
+    max_comments: int = Field(default=500, ge=1, le=5_000)
+
+
+class XhsComment(BaseModel):
+    """One normalized Xiaohongshu top-level comment or reply."""
+
+    index: int
+    comment_id: str
+    root_comment_id: str
+    parent_comment_id: str | None
+    depth: int
+    user_id: str
+    author: str
+    text: str
+    published_at: str
+    published_at_ms: int | None
+    ip_location: str
+    likes: str
+    reply_count: int
+    reply_to: str
+
+
+class XhsCommentsResult(BaseModel):
+    """Bounded Xiaohongshu comment collection with explicit completeness metadata."""
+
+    note_id: str
+    url: str
+    total: int | None
+    fetched: int
+    complete: bool
+    limit_reached: bool
+    pages_fetched: int
+    scrolls: int
+    items: tuple[XhsComment, ...]

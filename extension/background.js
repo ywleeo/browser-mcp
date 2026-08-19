@@ -24,6 +24,7 @@ const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const sockets = new Map();
 const pendingUrlChecks = new Map();
 const pendingXhsSearches = new Map();
+const pendingXhsComments = new Map();
 const pendingXhsUserNotes = new Map();
 const interactiveTabs = new Map();
 const interactionWindows = new Map();
@@ -1267,6 +1268,8 @@ async function dispatchXhsFetch(state, message) {
     await runXhsSearch(state, message.args || {}, reply);
   } else if (message.action === "note") {
     await runXhsNote(state, message.args || {}, reply);
+  } else if (message.action === "comments") {
+    await runXhsComments(state, message.args || {}, reply);
   } else if (message.action === "user_notes") {
     await runXhsUserNotes(state, message.args || {}, reply);
   } else {
@@ -1369,7 +1372,241 @@ function handleObservedXhsResponse(message, sender) {
       pendingUserNotes.responses.push({ url, body: String(message.body || "") });
     }
   }
+
+  const pendingComments = tabId == null ? null : pendingXhsComments.get(tabId);
+  if (
+    pendingComments &&
+    /\/api\/sns\/web\/v[12]\/comment\/(?:page|sub\/page)(?:\?|$)/.test(url)
+  ) {
+    if (message.truncated === true) {
+      pendingComments.errors.push("XHS comment response exceeded the 4 MiB safety limit");
+    } else if (Number(message.status) < 200 || Number(message.status) >= 300) {
+      pendingComments.errors.push(`XHS comment request returned HTTP ${message.status || 0}`);
+    } else {
+      pendingComments.responses.push({ url, body: String(message.body || "") });
+    }
+  }
   return false;
+}
+
+/** Add comment ids from one API record and its inline replies to the collected set. */
+function trackXhsCommentRecord(rawComment, seenIds) {
+  if (!rawComment || typeof rawComment !== "object") return;
+  const commentId = String(rawComment.id || rawComment.comment_id || "");
+  if (commentId) seenIds.add(commentId);
+  const replies = Array.isArray(rawComment.sub_comments)
+    ? rawComment.sub_comments
+    : Array.isArray(rawComment.subComments) ? rawComment.subComments : [];
+  for (const reply of replies) trackXhsCommentRecord(reply, seenIds);
+}
+
+/** Parse newly observed comment responses and retain their pagination metadata. */
+function drainXhsCommentResponses(pending, noteId, pages, seenIds, progress) {
+  while (pending.responses.length) {
+    const response = pending.responses.shift();
+    const responseUrl = new URL(response.url, "https://edith.xiaohongshu.com");
+    const responseNoteId = responseUrl.searchParams.get("note_id");
+    if (responseNoteId && responseNoteId !== noteId) continue;
+    const payload = JSON.parse(response.body);
+    const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const comments = Array.isArray(data?.comments)
+      ? data.comments
+      : Array.isArray(data?.comment_list) ? data.comment_list : [];
+    const kind = /\/comment\/sub\/page(?:\?|$)/.test(responseUrl.pathname) ? "sub" : "root";
+    const rootCommentId = responseUrl.searchParams.get("root_comment_id") || "";
+    pages.push({
+      kind,
+      url: responseUrl.toString(),
+      root_comment_id: rootCommentId,
+      payload,
+    });
+    for (const comment of comments) trackXhsCommentRecord(comment, seenIds);
+    if (kind === "root") {
+      progress.sawRootPage = true;
+      const hasMore = data?.has_more ?? data?.hasMore;
+      if (typeof hasMore === "boolean") progress.rootComplete = !hasMore;
+    }
+  }
+}
+
+/** Collect XHS comments by scrolling the note stream instead of the page body. */
+async function runXhsComments(state, args, reply) {
+  const noteId = String(args.noteId || "").trim();
+  if (!noteId) {
+    reply({ ok: false, error: "xhs noteId is required" });
+    return;
+  }
+  const xsecToken = String(args.xsecToken || "");
+  const xsecSource = String(args.xsecSource || "pc_search");
+  const maxComments = Math.max(1, Math.min(5000, Number(args.maxComments) || 500));
+  const maxScrolls = Math.max(40, Math.min(220, Math.ceil(maxComments * 0.6)));
+  const target = new URL(`https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`);
+  if (xsecToken) target.searchParams.set("xsec_token", xsecToken);
+  if (xsecSource) target.searchParams.set("xsec_source", xsecSource);
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+
+  let tabId = null;
+  let windowId = null;
+  let debugTarget = null;
+  const pages = [];
+  const seenIds = new Set();
+  const progress = { sawRootPage: false, rootComplete: false };
+  let expectedCount = null;
+  let scrolls = 0;
+  let complete = false;
+  let limitReached = false;
+  let stableRounds = 0;
+  let previousHeight = -1;
+  let previousCount = -1;
+  let scrollDirection = 1;
+  let sweepTurns = 0;
+
+  try {
+    const createdWindow = await chrome.windows.create({
+      url: "https://www.xiaohongshu.com/explore",
+      focused: false,
+      type: "normal",
+    });
+    const [tab] = createdWindow.tabs || [];
+    tabId = tab?.id;
+    windowId = createdWindow.id;
+    if (tabId == null || windowId == null) {
+      throw new Error("Chrome did not create an isolated XHS comments window");
+    }
+    await waitForTabComplete(tabId);
+    const pending = { responses: [], errors: [] };
+    pendingXhsComments.set(tabId, pending);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    debugTarget = { tabId };
+    await chrome.debugger.attach(debugTarget, "1.3");
+
+    for (scrolls = 0; scrolls < maxScrolls; scrolls += 1) {
+      if (pending.errors.length) throw new Error(pending.errors.shift());
+      drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
+
+      const [{ result: ui } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => {
+          const scroller = document.querySelector(".note-scroller");
+          if (!(scroller instanceof HTMLElement)) {
+            return { error: "XHS .note-scroller comment stream was not found" };
+          }
+          const countMatch = scroller.textContent?.match(/共\s*(\d+)\s*条评论/);
+          const scrollerRect = scroller.getBoundingClientRect();
+          const expanders = Array.from(scroller.querySelectorAll(".show-more")).filter((element) => {
+            if (
+              !/展开.*回复/.test(element.textContent || "")
+              || !(element instanceof HTMLElement)
+              || element.offsetParent === null
+            ) return false;
+            const rect = element.getBoundingClientRect();
+            return rect.bottom >= scrollerRect.top && rect.top <= scrollerRect.bottom;
+          });
+          let clicked = 0;
+          for (const element of expanders.slice(0, 4)) {
+            element.click();
+            clicked += 1;
+          }
+          return {
+            expectedCount: countMatch ? Number(countMatch[1]) : null,
+            clicked,
+            wheelX: Math.round(scrollerRect.left + scrollerRect.width / 2),
+            wheelY: Math.round(scrollerRect.top + scrollerRect.height / 2),
+            clientHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+            atTop: scroller.scrollTop <= 4,
+            atBottom: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4,
+            endText: /(到底了|没有更多)/.test(scroller.textContent || ""),
+          };
+        },
+      });
+      if (!ui || ui.error) throw new Error(ui?.error || "XHS comment stream returned no state");
+      if (Number.isFinite(ui.expectedCount)) expectedCount = Number(ui.expectedCount);
+
+      let directionChanged = false;
+      const needsReplySweep = expectedCount != null
+        && seenIds.size < expectedCount
+        && progress.rootComplete;
+      if (ui.clicked === 0 && needsReplySweep && sweepTurns < 4) {
+        if (scrollDirection > 0 && ui.atBottom) {
+          scrollDirection = -1;
+          sweepTurns += 1;
+          directionChanged = true;
+        } else if (scrollDirection < 0 && ui.atTop) {
+          scrollDirection = 1;
+          sweepTurns += 1;
+          directionChanged = true;
+        }
+      }
+      if (ui.clicked === 0) {
+        const wheelDelta = Math.max(320, Math.floor(Number(ui.clientHeight || 0) * 0.75));
+        await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: Number(ui.wheelX),
+          y: Number(ui.wheelY),
+          deltaX: 0,
+          deltaY: wheelDelta * scrollDirection,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      if (pending.errors.length) throw new Error(pending.errors.shift());
+      drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
+
+      const unchanged = previousCount === seenIds.size && previousHeight === ui.scrollHeight;
+      const atSweepBoundary = scrollDirection > 0 ? ui.atBottom : ui.atTop;
+      stableRounds = unchanged && ui.clicked === 0 && atSweepBoundary && !directionChanged
+        ? stableRounds + 1
+        : 0;
+      previousCount = seenIds.size;
+      previousHeight = ui.scrollHeight;
+
+      const expectedReached = expectedCount != null && seenIds.size >= expectedCount;
+      const reachedNaturalEnd = expectedCount != null
+        ? expectedReached
+        : progress.rootComplete || ui.endText;
+      if (seenIds.size >= maxComments && !expectedReached) {
+        limitReached = true;
+        break;
+      }
+      if (
+        stableRounds >= 2
+        && ui.clicked === 0
+        && reachedNaturalEnd
+      ) {
+        complete = true;
+        break;
+      }
+      if (stableRounds >= 10) break;
+    }
+
+    drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
+    if (expectedCount != null && seenIds.size >= expectedCount && !limitReached) complete = true;
+    reply({
+      ok: true,
+      data: {
+        expected_count: expectedCount,
+        complete,
+        limit_reached: limitReached,
+        scrolls: Math.min(scrolls + 1, maxScrolls),
+        pages,
+      },
+    });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (tabId != null) pendingXhsComments.delete(tabId);
+    if (debugTarget != null) await chrome.debugger.detach(debugTarget).catch(() => {});
+    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
+    else if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
 }
 
 /** Read a captured signed user-posted response for one requested cursor. */

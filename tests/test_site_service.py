@@ -15,6 +15,7 @@ from browser_mcp.sites.auth import SiteLoginRequiredError
 from browser_mcp.sites.models import (
     SitePageRequest,
     WebSearchRequest,
+    XhsCommentsRequest,
     XhsNoteRequest,
     XhsSearchRequest,
     XhsUserNotesRequest,
@@ -123,6 +124,44 @@ async def test_xhs_note_passes_security_parameters_to_extension(tmp_path: Path) 
 
     assert result.title == "笔记"
     assert bridge.site_requests[0][2]["xsecToken"] == "a+b"
+
+
+@pytest.mark.asyncio
+async def test_xhs_comments_routes_stream_limit_and_security_parameters(tmp_path: Path) -> None:
+    """Comment collection should use its isolated adapter and preserve signed URL data."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("xhs.fetch", "comments")] = {
+        "expected_count": 0,
+        "complete": True,
+        "pages": [],
+        "scrolls": 1,
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    request = XhsCommentsRequest.model_validate(
+        {
+            "url": "https://www.xiaohongshu.com/explore/n1?xsec_token=a%2Bb&xsec_source=pc_search",
+            "max_comments": 123,
+        }
+    )
+
+    result = await service.xhs_comments(request)
+
+    assert result.complete is True
+    assert bridge.site_requests[0] == (
+        "xhs.fetch",
+        "comments",
+        {
+            "noteId": "n1",
+            "xsecToken": "a+b",
+            "xsecSource": "pc_search",
+            "maxComments": 123,
+        },
+    )
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
                 "zhihu_invitations",
                 "xhs_search",
                 "xhs_note",
+                "xhs_comments",
                 "xhs_user_notes",
                 "x_search",
                 "x_post",
