@@ -30,7 +30,17 @@ from browser_mcp.models import (
     SnapshotPageRequest,
 )
 from browser_mcp.sites import SiteService
+from browser_mcp.sites.media import MediaDownloader
 from browser_mcp.sites.models import (
+    DouyinCommentsRequest,
+    DouyinCommentsResult,
+    DouyinDownloadRequest,
+    DouyinSearchRequest,
+    DouyinSearchResult,
+    DouyinVideoRequest,
+    DouyinVideoResult,
+    MediaDownloadResult,
+    MediaSelection,
     RedditPostRequest,
     RedditPostResult,
     RedditSearchRequest,
@@ -44,6 +54,7 @@ from browser_mcp.sites.models import (
     WebSearchResult,
     XhsCommentsRequest,
     XhsCommentsResult,
+    XhsDownloadRequest,
     XhsNoteRequest,
     XhsNoteResult,
     XhsSearchRequest,
@@ -85,7 +96,10 @@ def create_server(
     """Create an isolated MCP server with generic and website-specific read tools."""
     resolved_settings = settings or AppSettings.from_env()
     browser_service = service or BrowserService(resolved_settings)
-    websites = site_service or SiteService(browser_service)
+    websites = site_service or SiteService(
+        browser_service,
+        media_downloader=MediaDownloader(resolved_settings.data_dir / "downloads"),
+    )
 
     @asynccontextmanager
     async def lifespan(_: MCPServer[None]) -> AsyncGenerator[None]:
@@ -110,7 +124,7 @@ def create_server(
             "Ask for explicit user confirmation immediately before actions that publish, "
             "send, purchase, delete, or otherwise cause consequential external side effects. "
             "Use the "
-            "zhihu_*, xhs_*, x_*, and reddit_* tools for stable site-specific "
+            "zhihu_*, xhs_*, douyin_*, x_*, and reddit_* tools for stable site-specific "
             "structured results. Use google_search, bing_search, or sogou_search "
             "when the user chooses a web search engine. Platform tools check login "
             "before every task. If a tool reports that login is required, tell the "
@@ -267,6 +281,25 @@ def create_server(
         request = XhsNoteRequest.model_validate({"url": url})
         return await websites.xhs_note(request)
 
+    async def _xhs_download(
+        url: str,
+        media: MediaSelection = MediaSelection.ALL,
+        output_dir: str | None = None,
+        overwrite: bool = False,
+        max_file_mb: int = 1_024,
+    ) -> MediaDownloadResult:
+        """Download selected images or video from one Xiaohongshu note."""
+        request = XhsDownloadRequest.model_validate(
+            {
+                "url": url,
+                "media": media,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "max_file_mb": max_file_mb,
+            }
+        )
+        return await websites.xhs_download(request)
+
     async def _xhs_comments(url: str, max_comments: int = 500) -> XhsCommentsResult:
         """Collect top-level comments and replies from one Xiaohongshu note."""
         request = XhsCommentsRequest.model_validate({"url": url, "max_comments": max_comments})
@@ -279,6 +312,39 @@ def create_server(
         """Read notes published by an account, defaulting to the logged-in account."""
         request = XhsUserNotesRequest(user_id=user_id, max_pages=max_pages)
         return await websites.xhs_user_notes(request)
+
+    async def _douyin_search(keyword: str, limit: int = 20) -> DouyinSearchResult:
+        """Search Douyin posts through the page's own signed streaming request."""
+        return await websites.douyin_search(DouyinSearchRequest(keyword=keyword, limit=limit))
+
+    async def _douyin_video(url: str) -> DouyinVideoResult:
+        """Read one canonical Douyin video or image-post URL."""
+        request = DouyinVideoRequest.model_validate({"url": url})
+        return await websites.douyin_video(request)
+
+    async def _douyin_download(
+        url: str,
+        media: MediaSelection = MediaSelection.ALL,
+        output_dir: str | None = None,
+        overwrite: bool = False,
+        max_file_mb: int = 1_024,
+    ) -> MediaDownloadResult:
+        """Download selected images or video from one Douyin post."""
+        request = DouyinDownloadRequest.model_validate(
+            {
+                "url": url,
+                "media": media,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "max_file_mb": max_file_mb,
+            }
+        )
+        return await websites.douyin_download(request)
+
+    async def _douyin_comments(url: str, max_comments: int = 500) -> DouyinCommentsResult:
+        """Collect root comments and expanded replies from one Douyin post."""
+        request = DouyinCommentsRequest.model_validate({"url": url, "max_comments": max_comments})
+        return await websites.douyin_comments(request)
 
     async def _google_search(keyword: str, limit: int = 10) -> WebSearchResult:
         """Search Google and return normalized organic web results."""
@@ -315,9 +381,7 @@ def create_server(
 
     async def _reddit_post(url: str, max_comments: int = 20) -> RedditPostResult:
         """Read one Reddit post plus a bounded set of rendered comments."""
-        request = RedditPostRequest.model_validate(
-            {"url": url, "max_comments": max_comments}
-        )
+        request = RedditPostRequest.model_validate({"url": url, "max_comments": max_comments})
         return await websites.reddit_post(request)
 
     async def _site_read_page(
@@ -461,7 +525,7 @@ def create_server(
         name="site_login_status",
         description=(
             "Check whether the current Chrome Profile is logged in to Zhihu, "
-            "Xiaohongshu, X, or Reddit without executing a platform task."
+            "Xiaohongshu, Douyin, X, or Reddit without executing a platform task."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,
@@ -536,6 +600,21 @@ def create_server(
         structured_output=True,
     )
     server.add_tool(
+        _xhs_download,
+        name="xhs_download",
+        description=(
+            "Download images, video, or all media from one Xiaohongshu note to a local "
+            "absolute directory; defaults to Browser MCP's data downloads directory."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
         _xhs_comments,
         name="xhs_comments",
         description=(
@@ -556,6 +635,65 @@ def create_server(
         description=(
             "List notes published by a Xiaohongshu account through the current Chrome "
             "session; omit user_id to use the logged-in account."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_search,
+        name="douyin_search",
+        description=(
+            "Search Douyin through its signed web stream and return normalized video or "
+            "image-post metadata."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_video,
+        name="douyin_video",
+        description=(
+            "Read one Douyin video or image post with author, statistics, media, and music."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_download,
+        name="douyin_download",
+        description=(
+            "Download images, video, or all media from one Douyin post to a local absolute "
+            "directory; defaults to Browser MCP's data downloads directory."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _douyin_comments,
+        name="douyin_comments",
+        description=(
+            "Collect Douyin comments and replies from the post's rendered comment stream; "
+            "returns completeness and limit metadata."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,

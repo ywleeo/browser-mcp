@@ -94,7 +94,13 @@ def test_shape_xhs_note_extracts_images_video_and_statistics() -> None:
                         "video": {
                             "media": {
                                 "stream": {
-                                    "h264": [{"masterUrl": "https://video.example/master.mp4"}]
+                                    "EF4": [
+                                        {"masterUrl": "https://video.example/fallback.mp4"},
+                                        {
+                                            "defaultStream": 1,
+                                            "master_url": "https://video.example/master.mp4",
+                                        },
+                                    ]
                                 }
                             }
                         },

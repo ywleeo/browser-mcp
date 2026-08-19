@@ -87,7 +87,7 @@ Robin 的 bridge 位于：
 | 站点/能力 | 获取机制 | Robin 中的解析路径 |
 | --- | --- | --- |
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
-| 抖音 | 真实页面触发签名请求，拦截 API JSON；视频详情有专门流程 | `douyin/url.rs` → `shape.rs` → `format.rs` |
+| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；评论在隔离窗口中定位实际可滚动评论容器并展开回复 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
 | 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR | `sites/xhs.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
@@ -315,7 +315,12 @@ class SiteAdapter(Protocol):
     async def execute(self, value: SiteInput, gateways: Gateways) -> SiteDocument: ...
 ```
 
-实现时不为了“统一”把所有站点参数塞进一个巨大的 `site_fetch` union schema。模型更容易正确调用小而明确的 MCP tools，因此对外继续采用 `douyin_fetch`、`xhs_fetch`、`bilibili_search` 这类窄 schema；统一接口只存在于内部。
+实现时不为了“统一”把所有站点参数塞进一个巨大的 `site_fetch` union schema。模型更容易正确调用小而明确的 MCP tools，因此对外继续采用 `douyin_search`、`douyin_video`、`xhs_search` 这类窄 schema；统一接口只存在于内部。
+
+媒体下载同样保持站点隔离：`xhs_download` 与 `douyin_download` 先调用各自详情 adapter，只有
+经过平台 CDN allowlist 和公共地址策略验证的页面派生 URL 才进入共享 `MediaDownloader`。
+下载器逐跳校验重定向、限制单文件大小、拒绝 HTML/JSON 伪响应，并通过同目录 `.part`
+文件原子发布；共享层不理解小红书或抖音的页面结构、签名和评论逻辑。
 
 ## 7. MCP 工具面
 

@@ -15,8 +15,7 @@ from browser_mcp.sites.models import SiteLoginState, SitePlatform
     [
         (
             SitePlatform.ZHIHU,
-            '<script id="js-initialData">'
-            '{"initialState":{"currentUser":"zhihu-user"}}</script>',
+            '<script id="js-initialData">{"initialState":{"currentUser":"zhihu-user"}}</script>',
             "https://www.zhihu.com/",
             "zhihu-user",
         ),
@@ -26,6 +25,12 @@ from browser_mcp.sites.models import SiteLoginState, SitePlatform
             '"userInfo":{"nickname":"小红书用户"}}}</script>',
             "https://www.xiaohongshu.com/explore",
             "小红书用户",
+        ),
+        (
+            SitePlatform.DOUYIN,
+            '<a href="/user/self">我的</a>',
+            "https://www.douyin.com/",
+            "",
         ),
         (
             SitePlatform.X,
@@ -67,6 +72,11 @@ def test_detects_logged_in_platform_sessions(
             SitePlatform.XHS,
             '<script>window.__INITIAL_STATE__ = {"user":{"loggedIn":false}}</script>',
             "https://www.xiaohongshu.com/explore",
+        ),
+        (
+            SitePlatform.DOUYIN,
+            "<button>登录</button>",
+            "https://www.douyin.com/",
         ),
         (
             SitePlatform.X,

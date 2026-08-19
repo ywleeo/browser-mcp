@@ -121,6 +121,8 @@ class ExtensionBundle:
                 "background.js",
                 "content_bridge.js",
                 "content_inject.js",
+                "douyin_content_bridge.js",
+                "douyin_content_inject.js",
                 "manifest.json",
                 "options.html",
                 "options.js",

@@ -26,6 +26,8 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert (first.directory / "background.js").is_file()
     assert (first.directory / "content_inject.js").is_file()
     assert (first.directory / "content_bridge.js").is_file()
+    assert (first.directory / "douyin_content_inject.js").is_file()
+    assert (first.directory / "douyin_content_bridge.js").is_file()
     assert first.build_id in (first.directory / "build-info.js").read_text(encoding="utf-8")
     assert pairing["base_port"] == 17_880
     assert pairing["pool_size"] == 10
@@ -54,6 +56,11 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "window.__INITIAL_STATE__?.note?.noteDetailMap" in background
     assert "func: readXhsNoteRuntimeState" in background
     assert 'message.action === "comments"' in background
+    assert 'message.type === "douyin.fetch"' in background
+    assert "function handleObservedDouyinResponse" in background
+    assert "/general\\/search\\/stream" in background
+    assert "function runDouyinComments" in background
+    assert "Douyin rendered comment stream was not found" in background
 
     if os.name != "nt":
         token_mode = (tmp_path / "pairing-token").stat().st_mode & 0o777

@@ -7,13 +7,30 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from browser_mcp.application import BrowserService
+from browser_mcp.config import DEFAULT_DATA_DIR
 from browser_mcp.models import BrowserFetchPayload, BrowserReadRequest, ExtractMode
 from browser_mcp.sites.auth import (
     login_probe_url,
     parse_site_login_status,
     require_site_login,
 )
+from browser_mcp.sites.douyin import (
+    parse_douyin_aweme_url,
+    shape_douyin_comments,
+    shape_douyin_search,
+    shape_douyin_video,
+)
+from browser_mcp.sites.media import MediaDownloader, MediaSource
 from browser_mcp.sites.models import (
+    DouyinCommentsRequest,
+    DouyinCommentsResult,
+    DouyinDownloadRequest,
+    DouyinSearchRequest,
+    DouyinSearchResult,
+    DouyinVideoRequest,
+    DouyinVideoResult,
+    MediaDownloadResult,
+    MediaSelection,
     RedditPostRequest,
     RedditPostResult,
     RedditSearchRequest,
@@ -26,6 +43,7 @@ from browser_mcp.sites.models import (
     WebSearchResult,
     XhsCommentsRequest,
     XhsCommentsResult,
+    XhsDownloadRequest,
     XhsNoteRequest,
     XhsNoteResult,
     XhsSearchRequest,
@@ -77,10 +95,14 @@ class SiteService:
         self,
         browser: BrowserService,
         snapshots: SiteSnapshotStore | None = None,
+        media_downloader: MediaDownloader | None = None,
     ) -> None:
         """Bind site use cases to the existing authenticated browser application port."""
         self._browser = browser
         self._snapshots = snapshots or SiteSnapshotStore()
+        self._media_downloader = media_downloader or MediaDownloader(
+            DEFAULT_DATA_DIR / "downloads"
+        )
 
     async def zhihu_search(self, request: ZhihuSearchRequest) -> ZhihuSearchResult:
         """Search Zhihu through its authenticated web API and normalize the result."""
@@ -174,6 +196,26 @@ class SiteService:
         )
         return shape_xhs_note(raw, identity)
 
+    async def xhs_download(self, request: XhsDownloadRequest) -> MediaDownloadResult:
+        """Resolve one XHS note through Chrome and download its selected media files."""
+        note = await self.xhs_note(XhsNoteRequest(url=request.url))
+        sources: list[MediaSource] = []
+        if request.media in {MediaSelection.ALL, MediaSelection.IMAGES}:
+            sources.extend(MediaSource(kind="image", url=image.url) for image in note.images)
+        if request.media in {MediaSelection.ALL, MediaSelection.VIDEO} and note.video_url:
+            sources.append(MediaSource(kind="video", url=note.video_url))
+        if not sources:
+            raise ValueError(f"XHS note contains no selected {request.media.value} media")
+        return await self._media_downloader.download(
+            platform="xhs",
+            post_id=note.note_id,
+            page_url=note.url,
+            sources=tuple(sources),
+            output_dir=request.output_dir,
+            overwrite=request.overwrite,
+            max_file_bytes=request.max_file_mb * 1_048_576,
+        )
+
     async def xhs_comments(self, request: XhsCommentsRequest) -> XhsCommentsResult:
         """Collect comments by scrolling the note's own stream and expanding replies."""
         identity = parse_xhs_note_url(str(request.url))
@@ -204,6 +246,77 @@ class SiteService:
             timeout_seconds=65.0,
         )
         return shape_xhs_user_notes(raw, request)
+
+    async def douyin_search(self, request: DouyinSearchRequest) -> DouyinSearchResult:
+        """Navigate Douyin search and normalize its page-signed streaming response."""
+        await self._require_login(SitePlatform.DOUYIN)
+        raw = await self._browser.gateway.request(
+            "douyin.fetch",
+            "search",
+            {
+                "keyword": request.keyword.strip(),
+                "limit": request.limit,
+            },
+            timeout_seconds=45.0,
+        )
+        return shape_douyin_search(raw, request)
+
+    async def douyin_video(self, request: DouyinVideoRequest) -> DouyinVideoResult:
+        """Read one canonical Douyin video or image post through its signed detail request."""
+        identity = parse_douyin_aweme_url(str(request.url))
+        await self._require_login(SitePlatform.DOUYIN)
+        raw = await self._browser.gateway.request(
+            "douyin.fetch",
+            "video",
+            {
+                "awemeId": identity.aweme_id,
+                "pageKind": identity.page_kind,
+            },
+            timeout_seconds=45.0,
+        )
+        return shape_douyin_video(raw, identity)
+
+    async def douyin_download(self, request: DouyinDownloadRequest) -> MediaDownloadResult:
+        """Resolve one Douyin post through Chrome and download its selected media files."""
+        post = await self.douyin_video(DouyinVideoRequest(url=request.url))
+        sources: list[MediaSource] = []
+        if post.aweme_type == "note" and request.media in {
+            MediaSelection.ALL,
+            MediaSelection.IMAGES,
+        }:
+            sources.extend(MediaSource(kind="image", url=url) for url in post.media_urls)
+        if post.aweme_type == "video" and request.media in {
+            MediaSelection.ALL,
+            MediaSelection.VIDEO,
+        }:
+            sources.extend(MediaSource(kind="video", url=url) for url in post.media_urls[:1])
+        if not sources:
+            raise ValueError(f"Douyin post contains no selected {request.media.value} media")
+        return await self._media_downloader.download(
+            platform="douyin",
+            post_id=post.aweme_id,
+            page_url=post.url,
+            sources=tuple(sources),
+            output_dir=request.output_dir,
+            overwrite=request.overwrite,
+            max_file_bytes=request.max_file_mb * 1_048_576,
+        )
+
+    async def douyin_comments(self, request: DouyinCommentsRequest) -> DouyinCommentsResult:
+        """Collect Douyin root comments and expanded replies from the post comment stream."""
+        identity = parse_douyin_aweme_url(str(request.url))
+        await self._require_login(SitePlatform.DOUYIN)
+        raw = await self._browser.gateway.request(
+            "douyin.fetch",
+            "comments",
+            {
+                "awemeId": identity.aweme_id,
+                "pageKind": identity.page_kind,
+                "maxComments": request.max_comments,
+            },
+            timeout_seconds=180.0,
+        )
+        return shape_douyin_comments(raw, identity, request)
 
     async def google_search(self, request: WebSearchRequest) -> WebSearchResult:
         """Search Google through rendered Chrome results."""

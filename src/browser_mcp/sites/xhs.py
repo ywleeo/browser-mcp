@@ -319,13 +319,18 @@ def shape_xhs_comments(
 
 
 def _video_url(note: dict[str, Any]) -> str | None:
-    """Select the first master URL across XHS video codec variants."""
+    """Select a master URL across both codec-named and opaque XHS stream groups."""
     stream = _object(_object(_object(note.get("video")).get("media")).get("stream"))
-    for codec in ("h264", "h265", "h266", "av1"):
-        entries = stream.get(codec)
-        if isinstance(entries, list) and entries:
-            first_entry = cast(list[object], entries)[0]
-            url = _string(_object(first_entry).get("masterUrl"))
+    preferred_groups = ("h264", "h265", "h266", "av1")
+    group_names = (*preferred_groups, *(name for name in stream if name not in preferred_groups))
+    for group_name in group_names:
+        entries = stream.get(group_name)
+        if not isinstance(entries, list):
+            continue
+        normalized_entries = [_object(entry) for entry in cast(list[object], entries)]
+        normalized_entries.sort(key=lambda entry: entry.get("defaultStream") != 1)
+        for entry in normalized_entries:
+            url = _string(entry.get("masterUrl")) or _string(entry.get("master_url"))
             if url:
                 return url
     return None

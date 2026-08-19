@@ -6,16 +6,23 @@ import json
 from datetime import date
 from pathlib import Path
 
+import httpx
 import pytest
 
 from browser_mcp.application import BrowserService
 from browser_mcp.config import AppSettings
 from browser_mcp.models import BrowserFetchPayload
 from browser_mcp.sites.auth import SiteLoginRequiredError
+from browser_mcp.sites.media import MediaDownloader
 from browser_mcp.sites.models import (
+    DouyinCommentsRequest,
+    DouyinDownloadRequest,
+    DouyinSearchRequest,
+    DouyinVideoRequest,
     SitePageRequest,
     WebSearchRequest,
     XhsCommentsRequest,
+    XhsDownloadRequest,
     XhsNoteRequest,
     XhsSearchRequest,
     XhsUserNotesRequest,
@@ -196,6 +203,127 @@ async def test_xhs_user_notes_defaults_to_logged_in_account_and_bounds_pages(
 
 
 @pytest.mark.asyncio
+async def test_douyin_tools_use_their_isolated_extension_namespace(tmp_path: Path) -> None:
+    """Search, detail, and comments should dispatch only through douyin.fetch."""
+    bridge = FakeBridge(tmp_path / "extension")
+    aweme: dict[str, object] = {
+        "aweme_id": "7478048831087725875",
+        "desc": "测试作品",
+        "author": {},
+        "statistics": {},
+    }
+    bridge.site_responses[("douyin.fetch", "search")] = {
+        "chunks": [{"data": [{"aweme_info": aweme}]}]
+    }
+    bridge.site_responses[("douyin.fetch", "video")] = {"aweme_detail": aweme}
+    bridge.site_responses[("douyin.fetch", "comments")] = {
+        "complete": True,
+        "pages": [],
+        "scrolls": 1,
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    url = "https://www.douyin.com/video/7478048831087725875"
+
+    search = await service.douyin_search(DouyinSearchRequest(keyword="牵手 APP", limit=10))
+    video = await service.douyin_video(DouyinVideoRequest.model_validate({"url": url}))
+    comments = await service.douyin_comments(
+        DouyinCommentsRequest.model_validate({"url": url, "max_comments": 123})
+    )
+
+    assert search.items[0].aweme_id == "7478048831087725875"
+    assert video.description == "测试作品"
+    assert comments.complete is True
+    assert [request[:2] for request in bridge.site_requests] == [
+        ("douyin.fetch", "search"),
+        ("douyin.fetch", "video"),
+        ("douyin.fetch", "comments"),
+    ]
+    assert bridge.site_requests[2][2]["maxComments"] == 123
+
+
+@pytest.mark.asyncio
+async def test_platform_downloads_resolve_media_through_site_detail(tmp_path: Path) -> None:
+    """Download tools should reuse normalized XHS and Douyin detail adapters before writing."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("xhs.fetch", "note")] = {
+        "note": {
+            "noteDetailMap": {
+                "n1": {
+                    "note": {
+                        "title": "图文",
+                        "user": {},
+                        "interactInfo": {},
+                        "imageList": [{"urlDefault": "https://sns-img.xhscdn.com/image"}],
+                    }
+                }
+            }
+        }
+    }
+    bridge.site_responses[("douyin.fetch", "video")] = {
+        "aweme_detail": {
+            "aweme_id": "7478048831087725875",
+            "desc": "视频",
+            "author": {},
+            "statistics": {},
+            "video": {
+                "play_addr": {"url_list": ["https://v.douyinvod.com/video"]},
+            },
+        }
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        """Return deterministic image or video bytes for approved test CDNs."""
+        is_image = request.url.host.endswith("xhscdn.com")
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg" if is_image else "video/mp4"},
+            content=b"image" if is_image else b"video",
+            request=request,
+        )
+
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    downloader = MediaDownloader(
+        tmp_path / "downloads",
+        url_policy=allow_public_url_policy(),
+        transport=httpx.MockTransport(handle),
+    )
+    service = SiteService(browser, media_downloader=downloader)
+
+    xhs = await service.xhs_download(
+        XhsDownloadRequest.model_validate(
+            {
+                "url": (
+                    "https://www.xiaohongshu.com/explore/n1"
+                    "?xsec_token=token&xsec_source=pc_search"
+                ),
+                "media": "images",
+            }
+        )
+    )
+    douyin = await service.douyin_download(
+        DouyinDownloadRequest.model_validate(
+            {"url": "https://www.douyin.com/video/7478048831087725875", "media": "video"}
+        )
+    )
+
+    assert Path(xhs.items[0].path).read_bytes() == b"image"
+    assert Path(douyin.items[0].path).read_bytes() == b"video"
+    assert [request[:2] for request in bridge.site_requests] == [
+        ("xhs.fetch", "note"),
+        ("douyin.fetch", "video"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_zhihu_invitations_passes_day_boundary_and_page_limit(tmp_path: Path) -> None:
     """Invitation acquisition should stop against a China-local day boundary."""
     bridge = FakeBridge(tmp_path / "extension")
@@ -280,9 +408,7 @@ async def test_rendered_search_services_build_safe_engine_and_social_urls(tmp_pa
     )
 
     x_result = await service.x_search(
-        XSearchRequest.model_validate(
-            {"keyword": "MCP browser", "sort": "latest", "limit": 5}
-        )
+        XSearchRequest.model_validate({"keyword": "MCP browser", "sort": "latest", "limit": 5})
     )
 
     assert x_result.items[0].post_id == "123"

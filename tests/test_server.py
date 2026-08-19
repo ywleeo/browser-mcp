@@ -44,8 +44,13 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "zhihu_invitations",
         "xhs_search",
         "xhs_note",
+        "xhs_download",
         "xhs_comments",
         "xhs_user_notes",
+        "douyin_search",
+        "douyin_video",
+        "douyin_download",
+        "douyin_comments",
         "x_search",
         "x_post",
         "reddit_search",
@@ -62,12 +67,19 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     click_annotations = annotations["browser_click"]
     type_annotations = annotations["browser_type"]
     press_annotations = annotations["browser_press"]
+    xhs_download_annotations = annotations["xhs_download"]
+    douyin_download_annotations = annotations["douyin_download"]
     assert snapshot_annotations is not None and snapshot_annotations.read_only_hint is True
     assert scroll_annotations is not None and scroll_annotations.read_only_hint is True
     assert click_annotations is not None and click_annotations.read_only_hint is False
     assert click_annotations.destructive_hint is True
     assert type_annotations is not None and type_annotations.read_only_hint is False
     assert press_annotations is not None and press_annotations.destructive_hint is True
+    assert xhs_download_annotations is not None
+    assert xhs_download_annotations.read_only_hint is False
+    assert xhs_download_annotations.destructive_hint is False
+    assert douyin_download_annotations is not None
+    assert douyin_download_annotations.idempotent_hint is False
     assert tools[0].annotations is not None
     assert tools[0].annotations.open_world_hint is False
     assert tools[1].annotations is not None

@@ -44,7 +44,13 @@ class FakeBridge:
         self.site_responses: dict[tuple[str, str], dict[str, Any]] = {}
         self.site_requests: list[tuple[str, str, dict[str, object]]] = []
         self.interactions: list[tuple[str, dict[str, object]]] = []
-        self.logged_in_sites = {"zhihu": True, "xhs": True, "x": True, "reddit": True}
+        self.logged_in_sites = {
+            "zhihu": True,
+            "xhs": True,
+            "douyin": True,
+            "x": True,
+            "reddit": True,
+        }
         self.started = False
         self.closed = False
 
@@ -99,6 +105,16 @@ class FakeBridge:
                     f'{{"user":{{"loggedIn":{logged_in},"userInfo":'
                     '{"nickname":"测试账号"}}}</script>'
                 ),
+            )
+        if host == "www.douyin.com" and path == "/":
+            if self.logged_in_sites["douyin"]:
+                return BrowserFetchPayload(
+                    final_url="https://www.douyin.com/",
+                    html='<a href="/user/self">我的</a>',
+                )
+            return BrowserFetchPayload(
+                final_url="https://www.douyin.com/",
+                html="<button>登录</button>",
             )
         if host == "x.com" and path == "/home":
             if self.logged_in_sites["x"]:

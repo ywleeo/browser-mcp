@@ -112,6 +112,7 @@ class SitePlatform(StrEnum):
 
     ZHIHU = "zhihu"
     XHS = "xhs"
+    DOUYIN = "douyin"
     X = "x"
     REDDIT = "reddit"
 
@@ -398,6 +399,48 @@ class XhsNoteRequest(BaseModel):
     url: HttpUrl
 
 
+class MediaSelection(StrEnum):
+    """Media kinds accepted by platform download tools."""
+
+    ALL = "all"
+    IMAGES = "images"
+    VIDEO = "video"
+
+
+class XhsDownloadRequest(BaseModel):
+    """Validated request to download media from one Xiaohongshu note."""
+
+    url: HttpUrl
+    media: MediaSelection = MediaSelection.ALL
+    output_dir: str | None = Field(default=None, max_length=4_096)
+    overwrite: bool = False
+    max_file_mb: int = Field(default=1_024, ge=1, le=4_096)
+
+
+class MediaDownloadItem(BaseModel):
+    """One successfully downloaded local media file."""
+
+    index: int
+    media_type: str
+    source_url: str
+    final_url: str
+    path: str
+    bytes: int
+    content_type: str
+    sha256: str
+
+
+class MediaDownloadResult(BaseModel):
+    """Downloaded media files and their exact local destination."""
+
+    platform: str
+    post_id: str
+    output_dir: str
+    downloaded: int
+    total_bytes: int
+    items: tuple[MediaDownloadItem, ...]
+
+
 class XhsImage(BaseModel):
     """One normalized Xiaohongshu image URL."""
 
@@ -460,3 +503,119 @@ class XhsCommentsResult(BaseModel):
     pages_fetched: int
     scrolls: int
     items: tuple[XhsComment, ...]
+
+
+class DouyinSearchRequest(BaseModel):
+    """Validated request for one Douyin keyword-search result page."""
+
+    keyword: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=20, ge=1, le=20)
+
+
+class DouyinSearchItem(BaseModel):
+    """One normalized Douyin video or image post returned by search."""
+
+    index: int
+    aweme_id: str
+    aweme_type: str
+    url: str
+    description: str
+    author: str
+    author_id: str
+    sec_uid: str
+    published_at: str
+    published_at_ms: int | None
+    duration_ms: int | None
+    likes: int
+    comments: int
+    collects: int
+    shares: int
+    cover_url: str
+
+
+class DouyinSearchResult(BaseModel):
+    """Normalized first batch from Douyin's signed streaming search response."""
+
+    keyword: str
+    has_more: bool
+    cursor: int | None
+    items: tuple[DouyinSearchItem, ...]
+
+
+class DouyinVideoRequest(BaseModel):
+    """Validated canonical Douyin video or image-post URL."""
+
+    url: HttpUrl
+
+
+class DouyinDownloadRequest(BaseModel):
+    """Validated request to download media from one Douyin post."""
+
+    url: HttpUrl
+    media: MediaSelection = MediaSelection.ALL
+    output_dir: str | None = Field(default=None, max_length=4_096)
+    overwrite: bool = False
+    max_file_mb: int = Field(default=1_024, ge=1, le=4_096)
+
+
+class DouyinVideoResult(BaseModel):
+    """Normalized metadata and media addresses for one Douyin post."""
+
+    aweme_id: str
+    aweme_type: str
+    url: str
+    description: str
+    author: str
+    author_id: str
+    sec_uid: str
+    published_at: str
+    published_at_ms: int | None
+    duration_ms: int | None
+    likes: int
+    comments: int
+    collects: int
+    shares: int
+    cover_url: str
+    media_urls: tuple[str, ...]
+    music_title: str
+    music_author: str
+
+
+class DouyinCommentsRequest(BaseModel):
+    """Validated request for comments loaded by one Douyin post page."""
+
+    url: HttpUrl
+    max_comments: int = Field(default=500, ge=1, le=5_000)
+
+
+class DouyinComment(BaseModel):
+    """One normalized Douyin top-level comment or reply."""
+
+    index: int
+    comment_id: str
+    root_comment_id: str
+    parent_comment_id: str | None
+    depth: int
+    user_id: str
+    author: str
+    text: str
+    published_at: str
+    published_at_ms: int | None
+    ip_location: str
+    likes: int
+    reply_count: int
+    reply_to: str
+
+
+class DouyinCommentsResult(BaseModel):
+    """Bounded Douyin comment collection with explicit completeness metadata."""
+
+    aweme_id: str
+    url: str
+    total: int | None
+    fetched: int
+    complete: bool
+    limit_reached: bool
+    pages_fetched: int
+    scrolls: int
+    items: tuple[DouyinComment, ...]

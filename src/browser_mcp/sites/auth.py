@@ -18,6 +18,7 @@ class SiteLoginRequiredError(RuntimeError):
 _PROBE_URLS: Final[dict[SitePlatform, str]] = {
     SitePlatform.ZHIHU: "https://www.zhihu.com/",
     SitePlatform.XHS: "https://www.xiaohongshu.com/explore",
+    SitePlatform.DOUYIN: "https://www.douyin.com/",
     SitePlatform.X: "https://x.com/home",
     SitePlatform.REDDIT: "https://www.reddit.com/",
 }
@@ -25,6 +26,7 @@ _PROBE_URLS: Final[dict[SitePlatform, str]] = {
 _LOGIN_URLS: Final[dict[SitePlatform, str]] = {
     SitePlatform.ZHIHU: "https://www.zhihu.com/signin",
     SitePlatform.XHS: "https://www.xiaohongshu.com/explore",
+    SitePlatform.DOUYIN: "https://www.douyin.com/",
     SitePlatform.X: "https://x.com/i/flow/login",
     SitePlatform.REDDIT: "https://www.reddit.com/login/",
 }
@@ -32,6 +34,7 @@ _LOGIN_URLS: Final[dict[SitePlatform, str]] = {
 _PLATFORM_NAMES: Final[dict[SitePlatform, str]] = {
     SitePlatform.ZHIHU: "知乎",
     SitePlatform.XHS: "小红书",
+    SitePlatform.DOUYIN: "抖音",
     SitePlatform.X: "X",
     SitePlatform.REDDIT: "Reddit",
 }
@@ -52,6 +55,8 @@ def parse_site_login_status(
         state, account = _zhihu_status(html)
     elif platform is SitePlatform.XHS:
         state, account = _xhs_status(html)
+    elif platform is SitePlatform.DOUYIN:
+        state, account = _douyin_status(html, final_url)
     elif platform is SitePlatform.X:
         state, account = _x_status(html, final_url)
     else:
@@ -146,6 +151,26 @@ def _x_status(html: str, final_url: str) -> tuple[SiteLoginState, str]:
         " | //a[contains(@href, '/i/flow/login')]",
     )
     if parsed.path.startswith("/i/flow/login") or login_marker is not None:
+        return SiteLoginState.LOGGED_OUT, ""
+    return SiteLoginState.UNKNOWN, ""
+
+
+def _douyin_status(html: str, final_url: str) -> tuple[SiteLoginState, str]:
+    """Detect Douyin's current-account navigation without reading browser credentials."""
+    root = parse_rendered_html(html)
+    profile = first_node(
+        root,
+        "//a[starts-with(@href, '/user/self') or "
+        "starts-with(@href, 'https://www.douyin.com/user/self')]",
+    )
+    if profile is not None:
+        return SiteLoginState.LOGGED_IN, ""
+    parsed = urlsplit(final_url)
+    login_marker = first_node(
+        root,
+        "//*[self::button or self::a][normalize-space(string(.))='登录']",
+    )
+    if parsed.path.startswith("/passport") or login_marker is not None:
         return SiteLoginState.LOGGED_OUT, ""
     return SiteLoginState.UNKNOWN, ""
 

@@ -22,6 +22,19 @@
       "js": ["content_bridge.js"],
       "run_at": "document_start",
       "all_frames": false
+    },
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "js": ["douyin_content_inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "js": ["douyin_content_bridge.js"],
+      "run_at": "document_start",
+      "all_frames": false
     }
   ],
   "options_page": "options.html",

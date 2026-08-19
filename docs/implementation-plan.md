@@ -1,6 +1,6 @@
 # Browser MCP 分阶段实施计划
 
-> 状态：阶段 1—3 已验收；阶段 4 知乎与阶段 5A 小红书已实现，等待用户验收
+> 状态：阶段 1—8 已实现；阶段 9 抖音首版读取能力已实现，等待真实插件验收
 > 前置设计：[architecture.md](architecture.md)
 > 执行规则：每个阶段完成后停止开发，由用户验收；只有收到确认才进入下一阶段。
 
@@ -278,6 +278,22 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
 - 搜索、热门、精选、视频详情、评论。
 - 页面自身发起签名请求，extension 只导航/观察，不复制签名算法。
 - 迁移 URL、shape、format 和日期转换 fixtures。
+
+### 首版实现结果
+
+- 新增 `douyin_search`、`douyin_video`、`douyin_download`、`douyin_comments` 四个窄工具，并把抖音纳入
+  `site_login_status` 的 fail-closed 登录检查。
+- 搜索捕获页面自己的 `/general/search/stream/` 流式响应；服务端兼容普通 JSON、连续 JSON
+  对象和带 HTTP chunk framing 的响应，不实现或保存抖音签名算法。
+- 作品详情捕获 `/aweme/detail/`，统一输出视频/图文类型、作者、发布时间、互动数据、封面、
+  媒体地址和音乐信息。
+- 小红书和抖音分别提供窄下载工具：先复用各自详情 adapter 获取页面实际媒体 URL，再由
+  服务端对平台 CDN、所有重定向、响应类型和单文件大小进行校验，使用 `.part` 临时文件原子
+  落盘；默认不覆盖已有文件。
+- 评论采集在隔离的非聚焦窗口中识别包含“全部评论”的实际滚动容器，发送原生滚轮事件、
+  展开回复并捕获 root/reply signed responses；桥接前裁剪为公开合同所需字段，避免原始响应
+  膨胀污染全局协议。
+- 热门和精选列表留在阶段 9 后续增量，不复用搜索或评论的脆弱 selector。
 
 ## 13. 阶段 10：淘宝
 

@@ -1,12 +1,14 @@
-"""Run concise opt-in smoke tests against real Zhihu and Xiaohongshu pages."""
+"""Run concise opt-in smoke tests against real browser-backed website adapters."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import re
 from collections.abc import Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 from mcp import ClientSession, StdioServerParameters, stdio_client
@@ -25,6 +27,14 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "auth",
             "zhihu",
             "xhs",
+            "xhs-media",
+            "douyin",
+            "douyin-search",
+            "douyin-first",
+            "douyin-comments",
+            "download",
+            "download-matrix",
+            "download-douyin-note",
             "x",
             "reddit",
             "search",
@@ -42,7 +52,17 @@ async def _wait_connected(session: ClientSession) -> dict[str, Any]:
     for _attempt in range(20):
         result = await session.call_tool("browser_status", {})
         data = cast(dict[str, Any], result.structured_content or {})
-        if data.get("connected") is True:
+        expected_build = ""
+        build_info = PROJECT_ROOT / "extension" / "build-info.js"
+        if build_info.is_file():
+            match = re.search(
+                r'BUNDLE_BUILD_ID\s*=\s*"([0-9a-f]+)"',
+                build_info.read_text(encoding="utf-8"),
+            )
+            expected_build = match.group(1) if match is not None else ""
+        if data.get("connected") is True and (
+            not expected_build or data.get("extension_build_id") == expected_build
+        ):
             return data
         await asyncio.sleep(1)
     raise RuntimeError("Chrome Extension did not connect within 20 seconds")
@@ -55,6 +75,19 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
     items = data.get("items")
     if isinstance(items, list):
         summary["item_count"] = len(items)
+        if "downloaded" in data:
+            summary["downloaded"] = data.get("downloaded")
+            summary["total_bytes"] = data.get("total_bytes")
+            if items and isinstance(items[0], dict):
+                summary["first_path"] = items[0].get("path")
+        if name.endswith("_comments"):
+            summary["root_count"] = sum(
+                1 for item in items if isinstance(item, dict) and item.get("depth") == 0
+            )
+            summary["reply_count"] = sum(
+                1 for item in items if isinstance(item, dict) and item.get("depth") != 0
+            )
+            summary["total"] = data.get("total")
         if "complete" in data:
             summary["complete"] = data.get("complete")
         if "pages_fetched" in data:
@@ -62,7 +95,10 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
         if items and isinstance(items[0], dict):
             first = cast(dict[str, object], items[0])
             summary["first_title"] = (
-                first.get("title") or first.get("question") or str(first.get("text") or "")[:120]
+                first.get("title")
+                or first.get("question")
+                or first.get("description")
+                or str(first.get("text") or "")[:120]
             )
             summary["first_url"] = first.get("url")
     elif result.is_error:
@@ -80,6 +116,13 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
         summary["url"] = data.get("url")
         summary["author"] = data.get("handle") or data.get("author")
         summary["text_preview"] = str(data.get("text") or "")[:200]
+    elif "aweme_id" in data:
+        summary["aweme_id"] = data.get("aweme_id")
+        summary["url"] = data.get("url")
+        summary["author"] = data.get("author")
+        summary["description_preview"] = str(data.get("description") or "")[:200]
+        summary["fetched"] = data.get("fetched")
+        summary["complete"] = data.get("complete")
     else:
         summary["final_url"] = data.get("final_url")
         content = str(data.get("content") or "")
@@ -156,7 +199,7 @@ async def _run(site: str) -> None:
                 )
             )
             if site in {"all", "auth"}:
-                for platform in ("zhihu", "xhs", "x", "reddit"):
+                for platform in ("zhihu", "xhs", "douyin", "x", "reddit"):
                     result = await session.call_tool(
                         "site_login_status",
                         {"platform": platform},
@@ -197,6 +240,207 @@ async def _run(site: str) -> None:
                     first = cast(dict[str, object], items[0])
                     note = await session.call_tool("xhs_note", {"url": first.get("url")})
                     _print_result("xhs_note", note)
+            if site in {"xhs-media"}:
+                image_download = await session.call_tool(
+                    "xhs_download",
+                    {
+                        "url": (
+                            "https://www.xiaohongshu.com/explore/6a7e86010000000032021f2b"
+                            "?xsec_token=AB9OF0PnPVXAU5uBPH-g3fXXFr1ywhGgvbOXulXfskASw%3D"
+                            "&xsec_source=pc_search"
+                        ),
+                        "media": "images",
+                        "max_file_mb": 256,
+                    },
+                )
+                _print_result("xhs_download[images]", image_download)
+                video_download = await session.call_tool(
+                    "xhs_download",
+                    {
+                        "url": (
+                            "https://www.xiaohongshu.com/explore/68c3c653000000001c005b89"
+                            "?xsec_token=ABgcNAzS19QZjMU_864PXkO5TeN0pHfOj_xsnW0pW1TCU%3D"
+                            "&xsec_source=pc_search"
+                        ),
+                        "media": "video",
+                        "max_file_mb": 512,
+                    },
+                )
+                _print_result("xhs_download[video]", video_download)
+            if site in {"douyin", "douyin-search"}:
+                result = await session.call_tool(
+                    "douyin_search",
+                    {"keyword": "牵手 APP", "limit": 5},
+                )
+                data = _print_result("douyin_search", result)
+                items = data.get("items")
+                if site == "douyin-search" and isinstance(items, list):
+                    print(
+                        json.dumps(
+                            {
+                                "results": [
+                                    {
+                                        "index": item.get("index"),
+                                        "aweme_type": item.get("aweme_type"),
+                                        "author": item.get("author"),
+                                        "comments": item.get("comments"),
+                                        "description": str(item.get("description") or "")[:160],
+                                        "url": item.get("url"),
+                                    }
+                                    for item in items
+                                    if isinstance(item, dict)
+                                ]
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                if (
+                    site == "douyin"
+                    and isinstance(items, list)
+                    and items
+                    and isinstance(items[0], dict)
+                ):
+                    first = cast(dict[str, object], items[0])
+                    video = await session.call_tool("douyin_video", {"url": first.get("url")})
+                    _print_result("douyin_video", video)
+                    comments = await session.call_tool(
+                        "douyin_comments",
+                        {"url": first.get("url"), "max_comments": 30},
+                    )
+                    _print_result("douyin_comments", comments)
+            if site in {"douyin-comments"}:
+                comments = await session.call_tool(
+                    "douyin_comments",
+                    {
+                        "url": "https://www.douyin.com/video/7478048831087725875",
+                        "max_comments": 30,
+                    },
+                )
+                _print_result("douyin_comments", comments)
+            if site in {"douyin-first"}:
+                first_url = "https://www.douyin.com/video/7478048831087725875"
+                download = await session.call_tool(
+                    "douyin_download",
+                    {
+                        "url": first_url,
+                        "media": "video",
+                        "max_file_mb": 256,
+                    },
+                )
+                _print_result("douyin_download", download)
+                comments = await session.call_tool(
+                    "douyin_comments",
+                    {"url": first_url, "max_comments": 100},
+                )
+                comment_data = _print_result("douyin_comments", comments)
+                comment_items = comment_data.get("items")
+                if isinstance(comment_items, list):
+                    print(
+                        json.dumps(
+                            {
+                                "comments": [
+                                    {
+                                        "index": item.get("index"),
+                                        "depth": item.get("depth"),
+                                        "author": item.get("author"),
+                                        "reply_to": item.get("reply_to"),
+                                        "text": item.get("text"),
+                                        "likes": item.get("likes"),
+                                        "ip_location": item.get("ip_location"),
+                                    }
+                                    for item in comment_items
+                                    if isinstance(item, dict)
+                                ]
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+            if site in {"download"}:
+                with TemporaryDirectory(prefix="browser-mcp-media-smoke-") as temporary:
+                    destination = Path(temporary)
+                    xhs_search = await session.call_tool(
+                        "xhs_search",
+                        {"keyword": "牵手 APP", "page": 1},
+                    )
+                    xhs_data = _print_result("xhs_search", xhs_search)
+                    xhs_items = xhs_data.get("items")
+                    if isinstance(xhs_items, list) and xhs_items:
+                        first_xhs = cast(dict[str, object], xhs_items[0])
+                        xhs_download = await session.call_tool(
+                            "xhs_download",
+                            {
+                                "url": first_xhs.get("url"),
+                                "media": "all",
+                                "output_dir": str(destination / "xhs"),
+                                "max_file_mb": 256,
+                            },
+                        )
+                        _print_result("xhs_download", xhs_download)
+                    douyin_search = await session.call_tool(
+                        "douyin_search",
+                        {"keyword": "牵手 APP", "limit": 5},
+                    )
+                    douyin_data = _print_result("douyin_search", douyin_search)
+                    douyin_items = douyin_data.get("items")
+                    if isinstance(douyin_items, list) and douyin_items:
+                        first_douyin = cast(dict[str, object], douyin_items[0])
+                        douyin_download = await session.call_tool(
+                            "douyin_download",
+                            {
+                                "url": first_douyin.get("url"),
+                                "media": "all",
+                                "output_dir": str(destination / "douyin"),
+                                "max_file_mb": 256,
+                            },
+                        )
+                        _print_result("douyin_download", douyin_download)
+            if site in {"download-matrix", "download-douyin-note"}:
+                with TemporaryDirectory(prefix="browser-mcp-media-matrix-") as temporary:
+                    destination = Path(temporary)
+                    if site == "download-matrix":
+                        xhs_video = await session.call_tool(
+                            "xhs_download",
+                            {
+                                "url": (
+                                    "https://www.xiaohongshu.com/explore/6a8186ae00000000270212e7"
+                                    "?xsec_token=ABqw20tRrnooUenYYL0PhAaRVnqh7YayBnvlZY0MYxTw8%3D"
+                                    "&xsec_source=pc_search"
+                                ),
+                                "media": "video",
+                                "output_dir": str(destination / "xhs-video"),
+                                "max_file_mb": 256,
+                            },
+                        )
+                        _print_result("xhs_download[video]", xhs_video)
+                    douyin_search = await session.call_tool(
+                        "douyin_search",
+                        {"keyword": "旅行攻略 图文", "limit": 20},
+                    )
+                    douyin_data = _print_result("douyin_search[note]", douyin_search)
+                    douyin_items = douyin_data.get("items")
+                    note_item = next(
+                        (
+                            item
+                            for item in douyin_items
+                            if isinstance(item, dict) and item.get("aweme_type") == "note"
+                        ),
+                        None,
+                    ) if isinstance(douyin_items, list) else None
+                    if isinstance(note_item, dict):
+                        douyin_images = await session.call_tool(
+                            "douyin_download",
+                            {
+                                "url": note_item.get("url"),
+                                "media": "images",
+                                "output_dir": str(destination / "douyin-images"),
+                                "max_file_mb": 256,
+                            },
+                        )
+                        _print_result("douyin_download[images]", douyin_images)
+                    else:
+                        print(json.dumps({"tool": "douyin_download[images]", "skipped": True}))
             if site in {"all", "x"}:
                 result = await session.call_tool(
                     "x_search",

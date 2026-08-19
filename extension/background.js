@@ -26,6 +26,8 @@ const pendingUrlChecks = new Map();
 const pendingXhsSearches = new Map();
 const pendingXhsComments = new Map();
 const pendingXhsUserNotes = new Map();
+const pendingDouyinReads = new Map();
+const pendingDouyinComments = new Map();
 const interactiveTabs = new Map();
 const interactionWindows = new Map();
 const interactionQueues = new Map();
@@ -175,6 +177,8 @@ function connectPort(port, config) {
       void dispatchZhihuFetch(state, message);
     } else if (message.type === "xhs.fetch") {
       void dispatchXhsFetch(state, message);
+    } else if (message.type === "douyin.fetch") {
+      void dispatchDouyinFetch(state, message);
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -1867,6 +1871,653 @@ async function runXhsNote(state, args, reply) {
   }
 }
 
+/** Dispatch one Douyin read adapter while leaving signing and transport to the page. */
+async function dispatchDouyinFetch(state, message) {
+  const reply = (payload) =>
+    sendJson(state, { type: "douyin.fetch.result", id: message.id, ...payload });
+  if (message.action === "search") {
+    await runDouyinSearch(state, message.args || {}, reply);
+  } else if (message.action === "video") {
+    await runDouyinVideo(state, message.args || {}, reply);
+  } else if (message.action === "comments") {
+    await runDouyinComments(state, message.args || {}, reply);
+  } else {
+    reply({ ok: false, error: `unsupported douyin action: ${message.action}` });
+  }
+}
+
+/** Return whether one observed response is the signed endpoint required by a read action. */
+function matchesDouyinRead(kind, url) {
+  if (kind === "search") {
+    return /\/aweme\/v1\/web\/general\/search\/stream\/(?:\?|$)/.test(url);
+  }
+  return /\/aweme\/v1\/web\/aweme\/detail\/(?:\?|$)/.test(url);
+}
+
+/** Wait for one page-signed Douyin response while retaining useful timeout diagnostics. */
+function waitForDouyinRead(tabId, kind) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const pending = pendingDouyinReads.get(tabId);
+      pendingDouyinReads.delete(tabId);
+      const seen = pending?.seenUrls?.slice(-20) || [];
+      reject(
+        new Error(
+          `timeout waiting for Douyin ${kind} response; URLs seen: ${
+            seen.join(" | ") || "(none)"
+          }`,
+        ),
+      );
+    }, SITE_ACTION_TIMEOUT_MS);
+    pendingDouyinReads.set(tabId, { kind, resolve, reject, timer, seenUrls: [] });
+  });
+}
+
+/** Navigate the real Douyin search UI and capture its signed streaming response. */
+async function runDouyinSearch(state, args, reply) {
+  const keyword = String(args.keyword || "").trim();
+  if (!keyword) {
+    reply({ ok: false, error: "douyin search keyword is required" });
+    return;
+  }
+  const target = new URL(`https://www.douyin.com/search/${encodeURIComponent(keyword)}`);
+  target.searchParams.set("type", "general");
+  await runDouyinObservedRead(state, target, "search", reply);
+}
+
+/** Navigate one canonical Douyin post and capture its signed aweme-detail response. */
+async function runDouyinVideo(state, args, reply) {
+  const awemeId = String(args.awemeId || "").trim();
+  const pageKind = String(args.pageKind || "video") === "note" ? "note" : "video";
+  if (!/^\d+$/.test(awemeId)) {
+    reply({ ok: false, error: "douyin awemeId must contain digits only" });
+    return;
+  }
+  const target = new URL(`https://www.douyin.com/${pageKind}/${awemeId}`);
+  if (pageKind === "note") {
+    await runDouyinNoteRead(state, target, awemeId, reply);
+    return;
+  }
+  await runDouyinObservedRead(state, target, "video", reply);
+}
+
+/** Read one Douyin image post from its server-rendered RENDER_DATA payload. */
+async function runDouyinNoteRead(state, target, awemeId, reply) {
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
+    tabId = tab.id;
+    if (tabId == null) throw new Error("Chrome did not create a Douyin note tab");
+    await waitForTabComplete(tabId);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [awemeId],
+      func: (expectedId) => {
+        const findAweme = (root) => {
+          const queue = [root];
+          const visited = new Set();
+          while (queue.length) {
+            const current = queue.shift();
+            if (!current || typeof current !== "object" || visited.has(current)) continue;
+            visited.add(current);
+            if (
+              String(current.aweme_id || current.awemeId || "") === expectedId
+              && (Array.isArray(current.images) || current.video || current.desc)
+            ) {
+              return current;
+            }
+            if (visited.size > 50_000) break;
+            for (const value of Object.values(current)) {
+              if (value && typeof value === "object") queue.push(value);
+            }
+          }
+          return null;
+        };
+        const script = document.querySelector("script#RENDER_DATA");
+        const encoded = script?.textContent || "";
+        let aweme = null;
+        if (encoded) {
+          let renderState = null;
+          try {
+            renderState = JSON.parse(decodeURIComponent(encoded));
+          } catch {
+            try {
+              renderState = JSON.parse(encoded);
+            } catch {
+              // Current note routes keep post data in React Flight scripts instead.
+            }
+          }
+          if (renderState) aweme = findAweme(renderState);
+        }
+
+        if (!aweme) {
+          for (const flightScript of document.scripts) {
+            const source = flightScript.textContent || "";
+            if (!source.includes("self.__pace_f.push") || !source.includes(expectedId)) continue;
+            const match = source.match(/self\.__pace_f\.push\(([\s\S]+)\)\s*;?\s*$/);
+            if (!match) continue;
+            try {
+              const pushed = JSON.parse(match[1]);
+              const flight = Array.isArray(pushed) ? pushed[1] : null;
+              if (typeof flight !== "string") continue;
+              const separator = flight.indexOf(":");
+              if (separator < 0) continue;
+              aweme = findAweme(JSON.parse(flight.slice(separator + 1).trim()));
+              if (aweme) break;
+            } catch {
+              // Flight scripts also carry module records; only JSON data records are relevant.
+            }
+          }
+        }
+        if (!aweme) return { error: "Douyin note aweme was not found in page state" };
+        const selected = {
+          aweme_id: aweme.aweme_id || aweme.awemeId,
+          aweme_type: aweme.aweme_type ?? aweme.awemeType,
+          desc: aweme.desc,
+          create_time: aweme.create_time ?? aweme.createTime,
+          duration: aweme.duration,
+          author: aweme.author || aweme.authorInfo,
+          statistics: aweme.statistics || aweme.stats,
+          images: aweme.images,
+          video: aweme.video,
+          music: aweme.music,
+        };
+        try {
+          return { aweme_detail: JSON.parse(JSON.stringify(selected)) };
+        } catch (error) {
+          return { error: `Douyin note serialization failed: ${error?.message || error}` };
+        }
+      },
+    });
+    if (!result || result.error) {
+      throw new Error(result?.error || "Douyin note script returned no data");
+    }
+    reply({ ok: true, data: { body: JSON.stringify(result) } });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
+/** Run one isolated Douyin navigation and return the observed bounded response body. */
+async function runDouyinObservedRead(state, target, kind, reply) {
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
+    tabId = tab.id;
+    if (tabId == null) throw new Error(`Chrome did not create a Douyin ${kind} tab`);
+    await waitForTabComplete(tabId);
+    const responseBody = waitForDouyinRead(tabId, kind);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    const body = await responseBody;
+    reply({ ok: true, data: { body } });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    const pending = tabId == null ? null : pendingDouyinReads.get(tabId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingDouyinReads.delete(tabId);
+    }
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
+/** Resolve pending Douyin reads and retain signed comment pages for active collectors. */
+function handleObservedDouyinResponse(message, sender) {
+  if (message?.type !== "douyin-response") return false;
+  const tabId = sender?.tab?.id;
+  const url = String(message.url || "");
+  const pendingRead = tabId == null ? null : pendingDouyinReads.get(tabId);
+  if (pendingRead) {
+    pendingRead.seenUrls.push(url);
+    if (matchesDouyinRead(pendingRead.kind, url)) {
+      clearTimeout(pendingRead.timer);
+      pendingDouyinReads.delete(tabId);
+      if (message.truncated === true) {
+        pendingRead.reject(new Error("Douyin response exceeded the 4 MiB safety limit"));
+      } else if (Number(message.status) < 200 || Number(message.status) >= 300) {
+        pendingRead.reject(new Error(`Douyin request returned HTTP ${message.status || 0}`));
+      } else {
+        pendingRead.resolve(String(message.body || ""));
+      }
+    }
+  }
+
+  const pendingComments = tabId == null ? null : pendingDouyinComments.get(tabId);
+  if (
+    pendingComments
+    && /\/aweme\/v1\/web\/comment\/(?:list|list\/reply)\/(?:\?|$)/.test(url)
+  ) {
+    if (message.truncated === true) {
+      pendingComments.errors.push("Douyin comment response exceeded the 4 MiB safety limit");
+    } else if (Number(message.status) < 200 || Number(message.status) >= 300) {
+      pendingComments.errors.push(`Douyin comment request returned HTTP ${message.status || 0}`);
+    } else {
+      pendingComments.responses.push({ url, body: String(message.body || "") });
+    }
+  }
+  return false;
+}
+
+/** Keep only fields required by the public comment contract before bridge serialization. */
+function compactDouyinComment(rawComment) {
+  const comment = rawComment && typeof rawComment === "object" ? rawComment : {};
+  const user = comment.user && typeof comment.user === "object" ? comment.user : {};
+  const replies = Array.isArray(comment.reply_comment)
+    ? comment.reply_comment.map(compactDouyinComment)
+    : [];
+  return {
+    cid: String(comment.cid || comment.comment_id || ""),
+    reply_id: String(comment.reply_id || ""),
+    reply_comment_id: String(comment.reply_comment_id || ""),
+    reply_to_user_name: String(comment.reply_to_user_name || ""),
+    text: String(comment.text || ""),
+    create_time: Number(comment.create_time) || 0,
+    ip_label: String(comment.ip_label || ""),
+    digg_count: Number(comment.digg_count) || 0,
+    reply_comment_total: Number(comment.reply_comment_total) || 0,
+    user: {
+      uid: String(user.uid || ""),
+      nickname: String(user.nickname || ""),
+    },
+    reply_comment: replies,
+  };
+}
+
+/** Add one compact comment and its inline replies to the collector's id set. */
+function trackDouyinCommentRecord(rawComment, seenIds) {
+  if (!rawComment || typeof rawComment !== "object") return;
+  const commentId = String(rawComment.cid || rawComment.comment_id || "");
+  if (commentId) seenIds.add(commentId);
+  const replies = Array.isArray(rawComment.reply_comment) ? rawComment.reply_comment : [];
+  for (const reply of replies) trackDouyinCommentRecord(reply, seenIds);
+}
+
+/** Parse newly observed root and reply responses into bounded normalized pages. */
+function drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress) {
+  while (pending.responses.length) {
+    const response = pending.responses.shift();
+    const responseUrl = new URL(response.url, "https://www.douyin.com");
+    const responseAwemeId = responseUrl.searchParams.get("aweme_id");
+    if (responseAwemeId && responseAwemeId !== awemeId) continue;
+    const body = String(response.body || "").trim();
+    if (!body) continue;
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch (error) {
+      throw new Error(
+        `Douyin comment JSON parse failed (${body.length} chars, ${responseUrl.pathname}): ${
+          error?.message || error
+        }`,
+      );
+    }
+    const comments = Array.isArray(payload?.comments) ? payload.comments : [];
+    const compactComments = comments.map(compactDouyinComment);
+    const kind = /\/comment\/list\/reply\/(?:\?|$)/.test(responseUrl.pathname)
+      ? "reply"
+      : "root";
+    const rootCommentId = responseUrl.searchParams.get("comment_id") || "";
+    pages.push({
+      kind,
+      root_comment_id: rootCommentId,
+      payload: {
+        comments: compactComments,
+        total: Number.isFinite(Number(payload?.total)) ? Number(payload.total) : null,
+        cursor: Number(payload?.cursor) || 0,
+        has_more: payload?.has_more === true || payload?.has_more === 1,
+      },
+    });
+    for (const comment of compactComments) trackDouyinCommentRecord(comment, seenIds);
+    if (kind === "root") {
+      progress.sawRootPage = true;
+      for (const comment of compactComments) {
+        const commentId = String(comment.cid || "");
+        if (commentId && Number(comment.reply_comment_total) > 0) {
+          progress.replyRoots.add(commentId);
+        }
+      }
+      if (Number.isFinite(Number(payload?.total))) {
+        progress.expectedCount = Math.max(progress.expectedCount || 0, Number(payload.total));
+      }
+      if (payload?.has_more === false || payload?.has_more === 0) progress.rootComplete = true;
+    } else if (
+      rootCommentId
+      && (payload?.has_more === false || payload?.has_more === 0)
+    ) {
+      progress.completedReplyRoots.add(rootCommentId);
+    }
+  }
+}
+
+/** Return whether every discovered reply stream has reached its signed terminal page. */
+function douyinReplyStreamsComplete(progress) {
+  return Array.from(progress.replyRoots).every((rootId) => (
+    progress.completedReplyRoots.has(rootId)
+  ));
+}
+
+/** Click one reply expander with a trusted Chrome input event. */
+async function clickDouyinReplyExpander(debugTarget, point) {
+  const click = async () => {
+    const position = { x: Number(point.x), y: Number(point.y) };
+    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      button: "none",
+      buttons: 0,
+      ...position,
+    });
+    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      ...position,
+    });
+    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+      ...position,
+    });
+  };
+  try {
+    await click();
+  } catch (firstError) {
+    if (!/not attached/i.test(String(firstError?.message || firstError))) throw firstError;
+    await chrome.debugger.attach(debugTarget, "1.3");
+    await click();
+  }
+}
+
+/** Advance Douyin's scoped comment stream, using DOM scrolling only as a debugger fallback. */
+async function scrollDouyinCommentStream(tabId, debugTarget, ui, deltaY) {
+  const command = {
+    type: "mouseWheel",
+    x: Number(ui.wheelX),
+    y: Number(ui.wheelY),
+    deltaX: 0,
+    deltaY,
+  };
+  try {
+    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", command);
+    return;
+  } catch (firstError) {
+    if (!/not attached/i.test(String(firstError?.message || firstError))) throw firstError;
+  }
+  try {
+    await chrome.debugger.attach(debugTarget, "1.3");
+    await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", command);
+    return;
+  } catch {}
+
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [deltaY],
+    func: (delta) => {
+      const marker = document.querySelector('[data-scroll="comment"]');
+      if (!(marker instanceof HTMLElement)) return false;
+      let current = marker;
+      while (current instanceof HTMLElement && current !== document.body) {
+        const style = getComputedStyle(current);
+        if (
+          /(auto|scroll)/.test(style.overflowY)
+          && current.scrollHeight > current.clientHeight + 40
+        ) break;
+        current = current.parentElement;
+      }
+      const scroller = current instanceof HTMLElement && current !== document.body
+        ? current
+        : marker;
+      const before = scroller.scrollTop;
+      scroller.scrollBy({ top: delta, behavior: "instant" });
+      scroller.dispatchEvent(new Event("scroll", { bubbles: false }));
+      return scroller.scrollTop !== before;
+    },
+  });
+  if (result !== true) throw new Error("Douyin comment stream could not be scrolled");
+}
+
+/** Collect Douyin comments by scrolling the actual rendered comment stream and expanding replies. */
+async function runDouyinComments(state, args, reply) {
+  const awemeId = String(args.awemeId || "").trim();
+  const pageKind = String(args.pageKind || "video") === "note" ? "note" : "video";
+  if (!/^\d+$/.test(awemeId)) {
+    reply({ ok: false, error: "douyin awemeId must contain digits only" });
+    return;
+  }
+  const maxComments = Math.max(1, Math.min(5000, Number(args.maxComments) || 500));
+  const maxScrolls = Math.max(80, Math.min(320, Math.ceil(maxComments * 0.75)));
+  const target = new URL(`https://www.douyin.com/${pageKind}/${awemeId}`);
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+
+  let tabId = null;
+  let windowId = null;
+  let debugTarget = null;
+  const pages = [];
+  const seenIds = new Set();
+  const progress = {
+    sawRootPage: false,
+    rootComplete: false,
+    expectedCount: null,
+    replyRoots: new Set(),
+    completedReplyRoots: new Set(),
+  };
+  let scrolls = 0;
+  let complete = false;
+  let limitReached = false;
+  let stableRounds = 0;
+  let previousHeight = -1;
+  let previousCount = -1;
+  let scrollDirection = 1;
+  let sweepTurns = 0;
+
+  try {
+    const createdWindow = await chrome.windows.create({
+      url: "https://www.douyin.com/",
+      focused: false,
+      type: "normal",
+    });
+    const [tab] = createdWindow.tabs || [];
+    tabId = tab?.id;
+    windowId = createdWindow.id;
+    if (tabId == null || windowId == null) {
+      throw new Error("Chrome did not create an isolated Douyin comments window");
+    }
+    await waitForTabComplete(tabId);
+    const pending = { responses: [], errors: [] };
+    pendingDouyinComments.set(tabId, pending);
+    await chrome.tabs.update(tabId, { url: target.toString() });
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    debugTarget = { tabId };
+    await chrome.debugger.attach(debugTarget, "1.3");
+
+    for (scrolls = 0; scrolls < maxScrolls; scrolls += 1) {
+      if (pending.errors.length) throw new Error(pending.errors.shift());
+      drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
+
+      const [{ result: ui } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => {
+          const marker = document.querySelector('[data-scroll="comment"]');
+          const candidates = Array.from(document.querySelectorAll("div, main, section"))
+            .filter((element) => {
+              if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
+              const style = getComputedStyle(element);
+              return /(auto|scroll)/.test(style.overflowY)
+                && element.clientHeight >= 160
+                && element.scrollHeight > element.clientHeight + 40;
+            })
+            .map((element) => {
+              const text = element.textContent || "";
+              let score = 0;
+              if (text.includes("全部评论")) score += 200;
+              if (text.includes("留下你的精彩评论")) score += 100;
+              score += Math.min(50, (text.match(/回复/g) || []).length * 2);
+              return { element, score };
+            })
+            .sort((left, right) => right.score - left.score);
+          let scopedScroller = marker;
+          while (scopedScroller instanceof HTMLElement && scopedScroller !== document.body) {
+            const style = getComputedStyle(scopedScroller);
+            if (
+              /(auto|scroll)/.test(style.overflowY)
+              && scopedScroller.scrollHeight > scopedScroller.clientHeight + 40
+            ) break;
+            scopedScroller = scopedScroller.parentElement;
+          }
+          const best = candidates[0];
+          const scroller = scopedScroller instanceof HTMLElement && scopedScroller !== document.body
+            ? scopedScroller
+            : best?.score > 0 ? best.element : null;
+          if (!(scroller instanceof HTMLElement)) {
+            return { error: "Douyin rendered comment stream was not found" };
+          }
+          const scrollerRect = scroller.getBoundingClientRect();
+          const visibleLeft = Math.max(0, scrollerRect.left);
+          const visibleRight = Math.min(innerWidth, scrollerRect.right);
+          const visibleTop = Math.max(0, scrollerRect.top);
+          const visibleBottom = Math.min(innerHeight, scrollerRect.bottom);
+          const commentRegion = marker instanceof HTMLElement ? marker : scroller;
+          const expanders = Array.from(new Set(commentRegion.querySelectorAll(
+            ".comment-reply-expand-btn, button, [role='button']",
+          ))).filter((element) => {
+            const text = (element.textContent || "").trim();
+            if (
+              /收起/.test(text)
+              || !/(展开|更多)/.test(text)
+              || !(element instanceof HTMLElement)
+              || element.offsetParent === null
+            ) return false;
+            const rect = element.getBoundingClientRect();
+            return rect.bottom >= scrollerRect.top && rect.top <= scrollerRect.top + scrollerRect.height;
+          });
+          const expanderPoints = expanders.slice(0, 1).map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              x: Math.max(1, Math.min(innerWidth - 1, Math.round(rect.left + rect.width / 2))),
+              y: Math.max(1, Math.min(innerHeight - 1, Math.round(rect.top + rect.height / 2))),
+            };
+          });
+          return {
+            clicked: expanderPoints.length,
+            expanderPoints,
+            wheelX: Math.max(1, Math.round((visibleLeft + visibleRight) / 2)),
+            wheelY: Math.max(1, Math.round((visibleTop + visibleBottom) / 2)),
+            clientHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+            atTop: scroller.scrollTop <= 4,
+            atBottom: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4,
+            endText: /(暂时没有更多了|没有更多|到底了)/.test(scroller.textContent || ""),
+          };
+        },
+      });
+      if (!ui || ui.error) throw new Error(ui?.error || "Douyin comment stream returned no state");
+      for (const point of ui.expanderPoints || []) {
+        await clickDouyinReplyExpander(debugTarget, point);
+      }
+
+      let directionChanged = false;
+      const needsReplySweep = progress.rootComplete && !douyinReplyStreamsComplete(progress);
+      if (ui.clicked === 0 && needsReplySweep && sweepTurns < 4) {
+        if (scrollDirection > 0 && ui.atBottom) {
+          scrollDirection = -1;
+          sweepTurns += 1;
+          directionChanged = true;
+        } else if (scrollDirection < 0 && ui.atTop) {
+          scrollDirection = 1;
+          sweepTurns += 1;
+          directionChanged = true;
+        }
+      }
+      if (ui.clicked === 0) {
+        const wheelDelta = Math.max(
+          320,
+          Math.min(500, Math.floor(Number(ui.clientHeight || 0) * 0.6)),
+        );
+        await scrollDouyinCommentStream(
+          tabId,
+          debugTarget,
+          ui,
+          wheelDelta * scrollDirection,
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      if (pending.errors.length) throw new Error(pending.errors.shift());
+      drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
+
+      const unchanged = previousCount === seenIds.size && previousHeight === ui.scrollHeight;
+      const atBoundary = scrollDirection > 0 ? ui.atBottom : ui.atTop;
+      stableRounds = unchanged && ui.clicked === 0 && atBoundary && !directionChanged
+        ? stableRounds + 1
+        : 0;
+      previousCount = seenIds.size;
+      previousHeight = ui.scrollHeight;
+
+      const expectedReached = progress.expectedCount != null
+        && seenIds.size >= progress.expectedCount;
+      const streamsComplete = progress.rootComplete && douyinReplyStreamsComplete(progress);
+      if (seenIds.size >= maxComments && !expectedReached) {
+        limitReached = true;
+        break;
+      }
+      if (stableRounds >= 2 && (expectedReached || streamsComplete)) {
+        complete = true;
+        break;
+      }
+      if (stableRounds >= 10 || (ui.endText && progress.rootComplete && stableRounds >= 2)) break;
+    }
+
+    drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
+    if (
+      progress.rootComplete
+      && douyinReplyStreamsComplete(progress)
+      && !limitReached
+    ) complete = true;
+    reply({
+      ok: true,
+      data: {
+        complete,
+        limit_reached: limitReached,
+        scrolls: Math.min(scrolls + 1, maxScrolls),
+        pages,
+      },
+    });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (tabId != null) pendingDouyinComments.delete(tabId);
+    if (debugTarget != null) await chrome.debugger.detach(debugTarget).catch(() => {});
+    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
+    else if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 /** Reconcile live sockets with the latest generated pairing configuration. */
 async function connectAll() {
   const config = await loadPairingConfig();
@@ -1890,6 +2541,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.runtime.onInstalled.addListener(connectAll);
 chrome.runtime.onStartup.addListener(connectAll);
 chrome.runtime.onMessage.addListener(handleObservedXhsResponse);
+chrome.runtime.onMessage.addListener(handleObservedDouyinResponse);
 chrome.debugger.onDetach.addListener((source) => {
   for (const [session, debuggerSession] of interactionDebuggers.entries()) {
     if (debuggerSession.target.tabId !== source.tabId) continue;
