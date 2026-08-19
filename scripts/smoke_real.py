@@ -476,7 +476,7 @@ async def _run(site: str) -> None:
                     {
                         "url": (
                             "https://testpages.eviltester.com/pages/forms/html-form/"
-                            "?browser-mcp-smoke=0.8.2"
+                            "?browser-mcp-smoke=0.9.0"
                         )
                     },
                 )

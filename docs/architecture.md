@@ -1,6 +1,6 @@
 # Browser MCP 架构设计
 
-> 状态：已确认，进入实施计划阶段
+> 状态：核心架构已实现；抖音与双平台媒体下载在 `0.9.0` 完成真实插件验收
 > 来源项目：`/Users/leeo/Code/github/ywleeo/robin`
 > 来源基线：Git `5bded8435fd105f4cbc68423ef4b93854f9a5e78`，并纳入当前工作区中对通用网页超时快照的未提交改进
 > 目标项目：`/Users/leeo/Code/github/ywleeo/browser-mcp`
@@ -16,7 +16,7 @@
 - 源码运行时使用项目根目录的固定 `extension/`，便于 GitHub 发布和开发者模式加载；wheel
   安装等无源码目录场景才释放到用户数据目录。MCP 工具始终返回实际目录和连接状态。
 - 通用网页读取与站点专用解析相互独立，新增站点不会污染 MCP、bridge 或全局模块。
-- 默认只读；会引起网站状态变化的点击、输入、上传和任意脚本执行不进入首个 MVP。
+- 站点结构化工具默认只读；通用视觉交互与媒体下载采用独立工具和明确风险标记。
 - 大内容使用不可变快照分页，不依赖模型反复重新加载网页。
 
 ## 2. 非目标
@@ -26,7 +26,7 @@
 - 不迁移 Robin 的 Agent、Tauri UI、模型配置、文件工具或工作流系统。
 - 不把 Chrome extension 打包成商店发布版本；先采用开发者模式加载 unpacked extension。
 - 不提供公网 MCP 服务。首选本地 stdio，避免额外的鉴权和远程浏览器安全边界。
-- 不在 MVP 中开放 `click`、`type`、`upload`、`eval` 等写入型浏览器自动化。
+- 不开放任意 JavaScript eval、任意文件上传以及点赞、评论、发帖、购买等站点写操作。
 - 不保证所有历史站点工具在 MVP 同时可用；站点适配器在通用读取稳定后逐个迁移。
 
 ## 3. 源码审计结论
@@ -48,7 +48,7 @@ Robin 的 bridge 位于：
 - extension bundle 有 build fingerprint，可发现已加载的 unpacked extension 版本过旧并触发 reload。
 - 源码安装提供独立的 `browser-mcp upgrade` 控制面：检查命令刷新 upstream 并输出 JSON，
   应用命令只接受干净、可 fast-forward 的工作区，再执行冻结依赖同步。升级进程不尝试重启
-  正在承载它的 MCP host；重启边界明确交给 Codex，随后复用 build fingerprint 自动重载扩展。
+  正在承载它的 MCP host；重连边界明确交给 MCP 客户端，随后复用 build fingerprint 自动重载扩展。
 - `browser.fetch` 支持 `readability`、`text`、`raw`、`xhr` 四种采集模式。
 - 当前工作区新增了“页面 30 秒未达到 complete 时仍返回已渲染 DOM 快照”的容错，应保留。
 
@@ -84,10 +84,10 @@ Robin 的 bridge 位于：
 
 ### 3.3 extension-backed 站点能力
 
-| 站点/能力 | 获取机制 | Robin 中的解析路径 |
+| 站点/能力 | 获取机制 | Browser MCP 实现边界 |
 | --- | --- | --- |
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
-| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；评论在隔离窗口中定位实际可滚动评论容器并展开回复 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
+| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
 | 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR | `sites/xhs.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
@@ -243,6 +243,7 @@ browser-mcp/
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
+├── CHANGELOG.md
 ├── docs/
 │   └── architecture.md
 ├── extension/
@@ -250,6 +251,8 @@ browser-mcp/
 │   ├── background.js
 │   ├── content_inject.js
 │   ├── content_bridge.js
+│   ├── douyin_content_inject.js
+│   ├── douyin_content_bridge.js
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化
@@ -261,14 +264,15 @@ browser-mcp/
 │   ├── extract/                # readability/text/raw/xhr renderer
 │   ├── snapshot/               # immutable snapshot store + Unicode 分页
 │   ├── sites/                  # 一个站点一个隔离模块
-│   │   ├── douyin/
-│   │   ├── xhs/
+│   │   ├── douyin.py
+│   │   ├── xhs.py
+│   │   ├── media.py            # 共享安全下载边界，不包含站点解析
 │   │   └── ...
 │   └── security/               # URL policy、pairing token、redaction
 └── tests/
     ├── fixtures/
-    ├── mcp_stdio.rs
-    └── extension_protocol.rs
+    ├── test_stdio_contract.py
+    └── test_bridge_manager.py
 ```
 
 依赖方向必须保持：
@@ -335,7 +339,7 @@ class SiteAdapter(Protocol):
 MVP 不需要站点工具就能验证最关键链路：
 
 ```text
-MCP client -> stdio -> Rust -> local WS -> extension -> Chrome -> capture
+MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
            <- snapshot metadata + first page <- extraction
 ```
 
@@ -406,8 +410,16 @@ MCP client -> stdio -> Rust -> local WS -> extension -> Chrome -> capture
 - unpacked extension bundle。
 - pairing token。
 - build fingerprint / version metadata。
+- 用户通过 `xhs_download` 或 `douyin_download` 明确下载的媒体文件；默认位于 `downloads/`，
+  也可由调用方指定其他绝对目录。
 
 网页正文、DOM、XHR 和 snapshot 默认只驻留内存，进程退出即清除。
+
+### 版本一致性
+
+`pyproject.toml` 中的项目版本是发布版本基准。Python 包 `__version__`、Chrome extension
+`manifest.json`、`uv.lock` 中的本项目版本必须与其一致；README 状态示例和变更日志同步
+展示当前发布版本。自动化测试会校验这些机器可读版本来源，避免 MCP server 与扩展版本漂移。
 
 ## 11. 测试策略
 

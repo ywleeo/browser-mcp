@@ -11,10 +11,13 @@ JavaScript 渲染页面及登录态页面。
 - 通用网页内容抽取和长内容分页。
 - 在不切走当前页面的后台 Chrome 窗口中，向 Agent 提供网页截图和可操作元素，并继续点击、滚动、输入、按键或选择选项。
 - 知乎搜索、问题、回答、文章及邀请回答。
-- 小红书搜索、账号发布列表及笔记详情。
+- 小红书搜索、账号发布列表、笔记详情、完整评论与图片/视频下载。
+- 抖音搜索、视频/图文详情、完整评论与图片/视频下载。
 - X 帖子搜索及帖子详情。
 - Reddit 帖子搜索、帖子详情及评论。
 - Google、必应和搜狗网页搜索。
+
+当前版本为 `0.9.0`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 发布、发送、购买、删除等会产生外部影响的最终操作，应在执行前向用户确认。
 
@@ -55,7 +58,8 @@ uv --directory /path/to/browser-mcp run browser-mcp upgrade --apply --json
 - 只使用 `git pull --ff-only` 更新源码。
 - 使用 `uv sync --frozen` 同步锁定依赖，不修改 `uv.lock`。
 
-`--apply` 成功并返回 `restart_required: true` 后，只需重启一次 Codex。新 MCP server
+`--apply` 成功并返回 `restart_required: true` 后，需要让客户端重新连接 MCP server。Codex
+中可开启新任务或重连该 MCP；只有客户端无法单独重连时才需要重启客户端。新 MCP server
 启动时会刷新扩展 bundle；已加载的 Chrome 扩展根据 build ID 自动重载，无需重新选择扩展目录。
 
 Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用返回的
@@ -131,10 +135,10 @@ codex mcp remove browser_mcp
   "state": "connected",
   "connected": true,
   "bridge_port": 17880,
-  "server_version": "0.8.2",
+  "server_version": "0.9.0",
   "install_mode": "source",
   "project_root": "/path/to/browser-mcp",
-  "source_commit": "bee7e8b",
+  "source_commit": "<git-commit>",
   "upgrade_check_command": "uv --directory /path/to/browser-mcp run browser-mcp upgrade --check --json",
   "upgrade_apply_command": "uv --directory /path/to/browser-mcp run browser-mcp upgrade --apply --json"
 }
@@ -146,13 +150,43 @@ server 启动时自动重新连接。更新扩展后若没有自动生效，请�
 
 扩展会使用当前 Chrome Profile 的登录状态访问页面，但不会向 MCP 返回或持久化 Cookie。
 
-知乎、小红书、X 和 Reddit 工具会在执行任务前检查当前 Chrome Profile 的平台登录状态：
+### 扩展权限
+
+- `<all_urls>`：用于打开调用方明确请求的公开 HTTP(S) 页面，并支持多个站点 adapter；不会
+  主动遍历浏览历史。
+- `debugger`：用于捕获页面请求响应，以及在评论流和视觉交互中发送可信浏览器输入事件。
+- `tabs`、`scripting`：用于管理隔离的后台标签页并执行项目内置的固定提取脚本。
+- `storage`、`alarms`：用于本地配对配置和 MV3 service worker 保活。
+
+扩展没有申请 `cookies` 权限。登录态只由目标页面在当前 Chrome Profile 内正常使用，Cookie
+不会通过 MCP 工具结果返回。
+
+知乎、小红书、抖音、X 和 Reddit 工具会在执行任务前检查当前 Chrome Profile 的平台登录状态：
 
 - 已登录：继续执行请求。
 - 未登录：停止任务并返回对应平台的登录地址，客户端会提示用户先登录。
 - 无法确认：停止任务，避免在登录状态不明确时继续访问目标内容。
 
 登录状态不做缓存。用户在 Chrome 中完成登录后，可以直接重试原来的请求。
+
+### 媒体下载
+
+`xhs_download` 和 `douyin_download` 支持以下通用参数：
+
+- `media`：选择 `images`、`video` 或 `all`。
+- `output_dir`：可选的绝对目录；省略时保存到 Browser MCP 数据目录下的 `downloads`。
+- `overwrite`：默认 `false`，同名文件会自动分配新文件名；只有显式设置后才覆盖。
+- `max_file_mb`：单文件大小上限，默认 1024 MiB。
+
+下载前会先通过当前 Chrome 登录态读取作品详情，再对页面派生的媒体 URL 执行平台 CDN
+白名单、公共地址、逐跳重定向和响应媒体类型校验。文件使用 `.part` 临时文件流式写入，
+完成后原子落盘；结果包含最终路径、字节数、Content-Type 和 SHA-256。
+
+### 评论完整性
+
+`xhs_comments` 与 `douyin_comments` 会滚动作评论流、展开回复，并观察页面自身发起的签名分页
+请求。结果中的 `complete` 表示已观察到所有已发现评论流的终止页；`limit_reached` 表示因
+`max_comments` 截断；`pages_fetched` 和 `scrolls` 可用于诊断采集过程。
 
 ### 扩展排错
 

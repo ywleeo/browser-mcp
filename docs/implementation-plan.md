@@ -1,6 +1,6 @@
 # Browser MCP 分阶段实施计划
 
-> 状态：阶段 1—8 已实现；阶段 9 抖音首版读取能力已实现，等待真实插件验收
+> 状态：阶段 1—8 已实现；阶段 9 抖音首版已通过真实插件验收，并发布为 `0.9.0`
 > 前置设计：[architecture.md](architecture.md)
 > 执行规则：每个阶段完成后停止开发，由用户验收；只有收到确认才进入下一阶段。
 
@@ -46,11 +46,11 @@
 | 2 | 独立 extension bridge | extension 能连接 `17880..17889`，状态可探测 |
 | 3 | Fetch MVP | 真实 Chrome 能读取静态页、JS 页、登录态页并分页 |
 | 4 | 知乎 adapter | 搜索、问题/回答/文章解析 |
-| 5 | 小红书 adapter | 搜索、笔记详情、账号笔记及评论流读取 |
+| 5 | 小红书 adapter | 搜索、笔记详情、账号笔记、评论流及媒体下载 |
 | 6 | X/Twitter adapter | 搜索、帖子、回复解析 |
 | 7 | Reddit adapter | 帖子、评论、subreddit/search 列表 |
 | 8 | 搜索引擎 adapters | Google 先行，其他引擎逐个验收 |
-| 9 | 抖音 adapter | 搜索、热门、精选、视频、评论 |
+| 9 | 抖音 adapter | 搜索、视频/图文详情、评论及媒体下载；热门、精选后续增量 |
 | 10 | 淘宝 adapter | 搜索、商品详情 |
 | 11 | 微博 adapter | 搜索、帖子、评论与 Chrome fallback |
 | 12 | 本地发布体验 | 安装脚本、客户端配置、打包评估 |
@@ -285,8 +285,9 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
   `site_login_status` 的 fail-closed 登录检查。
 - 搜索捕获页面自己的 `/general/search/stream/` 流式响应；服务端兼容普通 JSON、连续 JSON
   对象和带 HTTP chunk framing 的响应，不实现或保存抖音签名算法。
-- 作品详情捕获 `/aweme/detail/`，统一输出视频/图文类型、作者、发布时间、互动数据、封面、
-  媒体地址和音乐信息。
+- 视频详情捕获 `/aweme/detail/`；图文页面未发起该请求时，从服务端渲染的 React Flight
+  状态读取作品数据。两条路径统一输出作品类型、作者、发布时间、互动数据、封面、媒体地址
+  和音乐信息。
 - 小红书和抖音分别提供窄下载工具：先复用各自详情 adapter 获取页面实际媒体 URL，再由
   服务端对平台 CDN、所有重定向、响应类型和单文件大小进行校验，使用 `.part` 临时文件原子
   落盘；默认不覆盖已有文件。
@@ -294,6 +295,14 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
   展开回复并捕获 root/reply signed responses；桥接前裁剪为公开合同所需字段，避免原始响应
   膨胀污染全局协议。
 - 热门和精选列表留在阶段 9 后续增量，不复用搜索或评论的脆弱 selector。
+
+### 真实插件验收结果
+
+- 搜索“牵手 APP”稳定返回视频和图文作品，作品类型、作者、评论数和规范链接正确。
+- 视频详情、评论和下载链路已在同一作品上串联验证；评论完成 5 个 root/reply 分页，返回
+  8 条主评论和 12 条展开回复，`complete=true`。
+- 抖音视频、抖音图文图片、小红书视频和小红书图片均完成真实 CDN 下载，并通过实际
+  WebP/MP4 文件类型检查。
 
 ## 13. 阶段 10：淘宝
 

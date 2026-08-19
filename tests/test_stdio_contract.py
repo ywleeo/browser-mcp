@@ -76,7 +76,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
             assert structured["state"] == "disconnected"
             assert structured["bridge_port"] == bridge_port
             assert structured["extension_dir"] == str(tmp_path / "extension")
-            assert structured["server_version"] == "0.8.2"
+            assert structured["server_version"] == "0.9.0"
             assert structured["install_mode"] == "source"
             assert structured["project_root"] == str(PROJECT_ROOT)
             assert "--check --json" in cast(str, structured["upgrade_check_command"])
