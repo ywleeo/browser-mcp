@@ -1340,6 +1340,22 @@ async function waitForEngagementState(tabId, reader, action, expected, platform)
   );
 }
 
+/** Create a non-focused desktop window so site engagement controls keep their stable layout. */
+async function createEngagementWindow(url, platform) {
+  const createdWindow = await chrome.windows.create({
+    url,
+    focused: false,
+    type: "normal",
+    width: 1512,
+    height: 900,
+  });
+  const [tab] = createdWindow.tabs || [];
+  if (tab?.id == null || createdWindow.id == null) {
+    throw new Error(`Chrome did not create an isolated ${platform} engagement window`);
+  }
+  return { tabId: tab.id, windowId: createdWindow.id };
+}
+
 /** Dispatch one Xiaohongshu read adapter without exposing generic page mutation. */
 async function dispatchXhsFetch(state, message) {
   const reply = (payload) =>
@@ -1425,14 +1441,13 @@ async function runXhsMutation(state, action, args, reply) {
   }
 
   let tabId = null;
+  let windowId = null;
   let debugTarget = null;
   try {
-    const tab = await chrome.tabs.create({
-      url: "https://www.xiaohongshu.com/explore",
-      active: false,
-    });
-    tabId = tab.id;
-    if (tabId == null) throw new Error("Chrome did not create an XHS engagement tab");
+    ({ tabId, windowId } = await createEngagementWindow(
+      "https://www.xiaohongshu.com/explore",
+      "XHS",
+    ));
     await waitForTabComplete(tabId);
     await chrome.tabs.update(tabId, { url: target.toString() });
     await waitForTabComplete(tabId);
@@ -1490,7 +1505,11 @@ async function runXhsMutation(state, action, args, reply) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
     if (debugTarget) await chrome.debugger.detach(debugTarget).catch(() => {});
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    if (windowId != null) {
+      await chrome.windows.remove(windowId).catch(() => {});
+    } else if (tabId != null) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+    }
   }
 }
 
@@ -2107,20 +2126,47 @@ function readDouyinEngagementControl(action) {
       ? { selector: '[data-e2e="video-player-collect"]', inactive: "video-player-no-collect" }
       : null;
   if (!contract) return { error: `unsupported Douyin engagement action: ${action}` };
-  const candidates = Array.from(document.querySelectorAll(contract.selector)).filter((element) => {
+  /** Return whether a candidate can receive a trusted click in the current viewport. */
+  const isVisible = (element) => {
     if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
+  };
+  const semanticCandidates = Array.from(document.querySelectorAll(contract.selector));
+  const stateControl = semanticCandidates.find((element) => {
+    const marker = String(element.getAttribute("data-e2e-state") || "");
+    return marker === contract.inactive
+      || (action === "like" ? /digged/.test(marker) : /collect/.test(marker));
   });
-  const control = candidates.find((element) => {
+  if (!(stateControl instanceof HTMLElement)) {
+    return { error: `Douyin post-level ${action} state marker was not found` };
+  }
+  const visibleSemantic = semanticCandidates.filter(isVisible);
+  let control = visibleSemantic.find((element) => {
     const rect = element.getBoundingClientRect();
     return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
-  }) || candidates.at(-1);
+  }) || visibleSemantic.at(-1);
+  if (!(control instanceof HTMLElement)) {
+    const compactShare = Array.from(document.querySelectorAll(
+      '[data-e2e="detail-video-info"] [data-e2e="video-share-icon-container"]',
+    )).find(isVisible);
+    const compactGroup = compactShare?.parentElement;
+    const compactControls = compactGroup instanceof HTMLElement
+      ? Array.from(compactGroup.children).filter(isVisible)
+      : [];
+    const shareIndex = compactShare instanceof HTMLElement
+      ? compactControls.indexOf(compactShare)
+      : -1;
+    const compactIndex = action === "like" ? 0 : 2;
+    if (shareIndex >= 3 && compactIndex < shareIndex) {
+      control = compactControls[compactIndex];
+    }
+  }
   if (!(control instanceof HTMLElement)) {
     return { error: `Douyin post-level ${action} control was not found` };
   }
   control.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-  const marker = String(control.getAttribute("data-e2e-state") || "");
+  const marker = String(stateControl.getAttribute("data-e2e-state") || "");
   const activeMarker = action === "like" ? /digged/.test(marker) : /collect/.test(marker);
   if (!marker || (marker !== contract.inactive && !activeMarker)) {
     return {
@@ -2167,11 +2213,13 @@ async function runDouyinMutation(state, action, args, reply) {
   }
 
   let tabId = null;
+  let windowId = null;
   let debugTarget = null;
   try {
-    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
-    tabId = tab.id;
-    if (tabId == null) throw new Error("Chrome did not create a Douyin engagement tab");
+    ({ tabId, windowId } = await createEngagementWindow(
+      "https://www.douyin.com/",
+      "Douyin",
+    ));
     await waitForTabComplete(tabId);
     await chrome.tabs.update(tabId, { url: target.toString() });
     await waitForTabComplete(tabId);
@@ -2229,7 +2277,11 @@ async function runDouyinMutation(state, action, args, reply) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
     if (debugTarget) await chrome.debugger.detach(debugTarget).catch(() => {});
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    if (windowId != null) {
+      await chrome.windows.remove(windowId).catch(() => {});
+    } else if (tabId != null) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+    }
   }
 }
 

@@ -64,8 +64,16 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert 'active: "#collected"' in background
     assert "function readDouyinEngagementControl" in background
     assert 'data-e2e="video-player-digg"' in background
+    assert 'data-e2e="detail-video-info"' in background
+    assert 'data-e2e="video-share-icon-container"' in background
     assert "async function dispatchTrustedPointClick" in background
     assert "the click was not retried" in background
+    assert "Chrome did not create an isolated ${platform} engagement window" in background
+    assert '"https://www.xiaohongshu.com/explore",\n      "XHS"' in background
+    assert '"https://www.douyin.com/",\n      "Douyin"' in background
+    assert "async function createEngagementWindow" in background
+    assert "width: 1512" in background
+    assert "height: 900" in background
     assert "function handleObservedDouyinResponse" in background
     assert "/general\\/search\\/stream" in background
     assert "function runDouyinComments" in background
