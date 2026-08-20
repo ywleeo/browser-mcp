@@ -57,6 +57,15 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "func: readXhsNoteRuntimeState" in background
     assert 'message.action === "comments"' in background
     assert 'message.type === "douyin.fetch"' in background
+    assert 'message.type === "bilibili.fetch"' in background
+    assert "async function runBilibiliSearch" in background
+    assert "async function readBilibiliSearchPageTab" in background
+    assert "Bilibili rendered search page exposed no video cards" in background
+    assert "async function runBilibiliVideo" in background
+    assert "window.__playinfo__" in background
+    assert 'message.type === "bridge.shutdown"' in background
+    assert "async function cleanupBridgeSessionsForPort" in background
+    assert "if (state.socket !== socket) return;" in background
     assert 'message.type === "xhs.mutate"' in background
     assert 'message.type === "douyin.mutate"' in background
     assert "function readXhsEngagementControl" in background

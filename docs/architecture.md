@@ -1,6 +1,6 @@
 # Browser MCP 架构设计
 
-> 状态：核心架构已实现；`0.10.0` 新增双平台期望状态式点赞/收藏，等待真实账号验收
+> 状态：核心架构已实现；`0.11.0` 新增 B 站搜索、meta 与视频/纯音频下载
 > 来源项目：`/Users/leeo/Code/github/ywleeo/robin`
 > 来源基线：Git `5bded8435fd105f4cbc68423ef4b93854f9a5e78`，并纳入当前工作区中对通用网页超时快照的未提交改进
 > 目标项目：`/Users/leeo/Code/github/ywleeo/browser-mcp`
@@ -90,6 +90,7 @@ Robin 的 bridge 位于：
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
 | 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复；点赞/收藏只定位作品级 `data-e2e` 控件 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
 | 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR；点赞/收藏只定位详情底栏语义图标 | `sites/xhs.py` + `extension/background.js` |
+| Bilibili | 搜索在 Chrome 中读取公开 API；详情页在当前会话中读取 view/tag API 与页面生成的 DASH playinfo；服务端选择兼容轨并按需用 FFmpeg stream copy 合并 | `sites/bilibili.py` + `sites/bilibili_media.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
 | 微博搜索 fallback | 直连失败时，用 Chrome 渲染 HTML 后解析 | `weibo/search.rs` → `format.rs` |
@@ -326,10 +327,11 @@ class SiteAdapter(Protocol):
 
 实现时不为了“统一”把所有站点参数塞进一个巨大的 `site_fetch` union schema。模型更容易正确调用小而明确的 MCP tools，因此对外继续采用 `douyin_search`、`douyin_video`、`xhs_search` 这类窄 schema；统一接口只存在于内部。
 
-媒体下载同样保持站点隔离：`xhs_download` 与 `douyin_download` 先调用各自详情 adapter，只有
+媒体下载同样保持站点隔离：各平台下载工具先调用自己的详情 adapter，只有
 经过平台 CDN allowlist 和公共地址策略验证的页面派生 URL 才进入共享 `MediaDownloader`。
 下载器逐跳校验重定向、限制单文件大小、拒绝 HTML/JSON 伪响应，并通过同目录 `.part`
-文件原子发布；共享层不理解小红书或抖音的页面结构、签名和评论逻辑。
+文件原子发布；共享层不理解任一平台的页面结构、签名和评论逻辑。B 站的 DASH 轨道选择与
+FFmpeg 合并位于独立 `BilibiliMediaDownloader`，不会改变小红书或抖音下载合同。
 
 点赞与收藏也保持平台隔离：对外是四个窄工具，内部共享层只负责 allowlist、请求关联和一次性
 可信点击，不理解任何平台 selector。小红书的 `#like/#liked`、`#collect/#collected` 与抖音的
@@ -359,7 +361,8 @@ MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
 - 第二批站点：X/Twitter、Reddit。
 - 第三批站点：搜索引擎；先迁移 Robin 已有 Google，再逐个增加其他引擎 adapter。
 - 第四批站点：抖音、淘宝、微博。
-- 其他 HTTP-backed 站点（如 Bilibili、网易云）不抢占上述业务顺序。
+- 已实现增量站点：Bilibili 搜索、视频 meta、分 P、视频与纯音频下载。
+- 其他 HTTP-backed 站点（如网易云）不抢占上述业务顺序。
 
 ### 可变更工具族
 
@@ -376,7 +379,12 @@ MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
 - 一个进程内的浏览器导航操作先按 session bucket 串行，纯 snapshot page 读取可并发。
 - request 在写入 socket 前注册 pending slot，防止快速 reply race。
 - extension 断连时立即失败所有 pending request。
-- server 收到 SIGINT、stdin EOF 或客户端断开后关闭 WS listener，并通知 extension 回收该进程创建的 tabs。
+- server 收到 SIGINT、stdin EOF 或客户端断开后，先发送 `bridge.shutdown`，再关闭 WebSocket
+  和 listener；extension 按 bridge port 回收该进程创建的隔离窗口和 debugger，不关闭用户
+  原本打开的标签页。
+- server 启动时跳过中间 `uv` wrapper，监控真实 MCP Host PID；Host 异常消失且 stdin 未能
+  正常 EOF 时，watchdog 在两秒内终止服务，由操作系统释放端口。特殊 supervisor 可通过
+  `BROWSER_MCP_OWNER_PID` 指定 owner，或以 `0` 显式关闭监控。
 - Chrome sleep/wake 导致半开连接时，清空 pending 并强制重连。
 
 ## 9. 安全设计
@@ -450,10 +458,12 @@ MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
 3. `browser_status`。
 4. tools/call 参数错误与结构化错误检查。
 5. shutdown / stdin EOF，确认进程正常退出且 stdout 没有日志污染。
+6. owner PID 异常消失且 stdin 保持打开，确认 watchdog 仍会退出并释放端口。
 
 ### extension integration test
 
-- 使用 mock WebSocket extension 验证 hello/auth、ping/pong、request/reply、timeout、断连清理。
+- 使用 mock WebSocket extension 验证 hello/auth、ping/pong、request/reply、timeout、
+  `bridge.shutdown` 与断连后的按端口资源清理。
 - 真实 Chrome smoke test 作为手工验收，不放进默认 CI。
 - 每个站点使用脱敏 fixture 做离线解析回归；在线站点测试只做可选 smoke，避免页面变化导致 CI 不稳定。
 

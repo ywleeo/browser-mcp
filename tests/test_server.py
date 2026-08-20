@@ -42,6 +42,10 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "zhihu_search",
         "zhihu_content",
         "zhihu_invitations",
+        "bilibili_search",
+        "bilibili_video",
+        "bilibili_download_video",
+        "bilibili_download_audio",
         "xhs_search",
         "xhs_note",
         "xhs_like",
@@ -73,6 +77,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     press_annotations = annotations["browser_press"]
     xhs_download_annotations = annotations["xhs_download"]
     douyin_download_annotations = annotations["douyin_download"]
+    bilibili_video_download_annotations = annotations["bilibili_download_video"]
     xhs_like_annotations = annotations["xhs_like"]
     douyin_collect_annotations = annotations["douyin_collect"]
     assert snapshot_annotations is not None and snapshot_annotations.read_only_hint is True
@@ -86,6 +91,9 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     assert xhs_download_annotations.destructive_hint is False
     assert douyin_download_annotations is not None
     assert douyin_download_annotations.idempotent_hint is False
+    assert bilibili_video_download_annotations is not None
+    assert bilibili_video_download_annotations.read_only_hint is False
+    assert bilibili_video_download_annotations.destructive_hint is False
     assert xhs_like_annotations is not None
     assert xhs_like_annotations.read_only_hint is False
     assert xhs_like_annotations.destructive_hint is True

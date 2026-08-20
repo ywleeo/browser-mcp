@@ -23,6 +23,7 @@ CHROME_EXTENSION_ORIGIN = Origin(f"chrome-extension://{'a' * 32}")
 async def run_mock_extension(
     manager: BridgeManager,
     connected: asyncio.Event,
+    shutdown_received: asyncio.Event | None = None,
 ) -> None:
     """Authenticate like the MV3 worker and answer bridge ping requests."""
     installed = manager.installed
@@ -49,15 +50,20 @@ async def run_mock_extension(
         acknowledgement = json.loads(await websocket.recv())
         assert acknowledgement["type"] == "hello_ack"
         connected.set()
-        await answer_pings(websocket)
+        await answer_pings(websocket, shutdown_received)
 
 
-async def answer_pings(websocket: ClientConnection) -> None:
+async def answer_pings(
+    websocket: ClientConnection,
+    shutdown_received: asyncio.Event | None = None,
+) -> None:
     """Reply to every JSON ping until the server or test closes the socket."""
     async for raw_message in websocket:
         message = json.loads(raw_message)
         if message.get("type") == "ping":
             await websocket.send(json.dumps({"type": "pong", "id": message.get("id")}))
+        elif message.get("type") == "bridge.shutdown" and shutdown_received is not None:
+            shutdown_received.set()
 
 
 async def run_mock_fetch_extension(manager: BridgeManager, connected: asyncio.Event) -> None:
@@ -167,6 +173,18 @@ async def run_mock_site_extension(manager: BridgeManager, connected: asyncio.Eve
                             "id": message["id"],
                             "ok": True,
                             "data": {"active": True},
+                        }
+                    )
+                )
+            elif message.get("type") == "bilibili.fetch":
+                assert message.get("action") == "search"
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "bilibili.fetch.result",
+                            "id": message["id"],
+                            "ok": True,
+                            "data": {"data": {"result": []}},
                         }
                     )
                 )
@@ -294,6 +312,33 @@ async def test_extension_can_reauthenticate_after_disconnect(tmp_path: Path) -> 
         if second_task is not None:
             second_task.cancel()
             await asyncio.gather(second_task, return_exceptions=True)
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_close_notifies_extension_before_releasing_listener(tmp_path: Path) -> None:
+    """Graceful shutdown should let the extension clean session-owned browser resources."""
+    settings = AppSettings(
+        bridge_port=reserve_free_port(),
+        bridge_port_pool_size=1,
+        data_dir=tmp_path,
+    )
+    manager = BridgeManager(settings)
+    await manager.start()
+    connected = asyncio.Event()
+    shutdown_received = asyncio.Event()
+    extension_task = asyncio.create_task(run_mock_extension(manager, connected, shutdown_received))
+    try:
+        await asyncio.wait_for(connected.wait(), 2)
+
+        await manager.close()
+
+        await asyncio.wait_for(shutdown_received.wait(), 2)
+        with pytest.raises(OSError):
+            await asyncio.open_connection("127.0.0.1", settings.bridge_port)
+    finally:
+        extension_task.cancel()
+        await asyncio.gather(extension_task, return_exceptions=True)
         await manager.close()
 
 
@@ -483,9 +528,15 @@ async def test_namespaced_site_action_round_trip(tmp_path: Path) -> None:
             "like",
             {"noteId": "n1", "enabled": True},
         )
+        bilibili = await manager.request(
+            "bilibili.fetch",
+            "search",
+            {"keyword": "MCP"},
+        )
 
         assert payload == {"data": {"items": []}}
         assert mutation == {"active": True}
+        assert bilibili == {"data": {"result": []}}
     finally:
         extension_task.cancel()
         await asyncio.gather(extension_task, return_exceptions=True)

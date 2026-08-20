@@ -109,3 +109,37 @@ async def test_media_downloader_requires_absolute_output_directory(tmp_path: Pat
             output_dir="downloads",
             overwrite=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_media_downloader_supports_bilibili_audio_cdn_contract(tmp_path: Path) -> None:
+    """Verified Bilibili CDN audio may use generic or MP4-container content types."""
+    observed_headers: dict[str, str] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        """Capture Bilibili Referer/Origin and return one audio track."""
+        observed_headers.update(dict(request.headers))
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4"},
+            content=b"audio-track",
+            request=request,
+        )
+
+    downloader = MediaDownloader(
+        tmp_path,
+        url_policy=allow_public_url_policy(),
+        transport=httpx.MockTransport(handle),
+    )
+    result = await downloader.download(
+        platform="bilibili",
+        post_id="BV1eaMH6gEDx_p01",
+        page_url="https://www.bilibili.com/video/BV1eaMH6gEDx/",
+        sources=(MediaSource(kind="audio", url="https://audio.mcdn.bilivideo.cn/track.m4s"),),
+        output_dir=None,
+        overwrite=False,
+    )
+
+    assert Path(result.items[0].path).suffix == ".m4a"
+    assert observed_headers["origin"] == "https://www.bilibili.com"
+    assert observed_headers["referer"].endswith("BV1eaMH6gEDx/")

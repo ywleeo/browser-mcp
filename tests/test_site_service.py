@@ -15,6 +15,8 @@ from browser_mcp.models import BrowserFetchPayload
 from browser_mcp.sites.auth import SiteLoginRequiredError
 from browser_mcp.sites.media import MediaDownloader
 from browser_mcp.sites.models import (
+    BilibiliSearchRequest,
+    BilibiliVideoRequest,
     DouyinCommentsRequest,
     DouyinDownloadRequest,
     DouyinSearchRequest,
@@ -57,6 +59,57 @@ def _zhihu_payload() -> BrowserFetchPayload:
         final_url="https://www.zhihu.com/question/123/answer/456",
         html=html,
     )
+
+
+@pytest.mark.asyncio
+async def test_bilibili_tools_use_their_isolated_extension_namespace(tmp_path: Path) -> None:
+    """Bilibili search and metadata should dispatch only through bilibili.fetch."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("bilibili.fetch", "search")] = {
+        "code": 0,
+        "data": {"numResults": 0, "numPages": 0, "result": []},
+    }
+    bridge.site_responses[("bilibili.fetch", "video")] = {
+        "view": {
+            "code": 0,
+            "data": {
+                "bvid": "BV1eaMH6gEDx",
+                "aid": 116889867130412,
+                "cid": 301,
+                "title": "测试视频",
+                "owner": {},
+                "stat": {},
+                "pages": [{"page": 1, "cid": 301, "part": "P1", "duration": 10}],
+            },
+        },
+        "tags": {"code": 0, "data": []},
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+
+    search = await service.bilibili_search(BilibiliSearchRequest(keyword="OpenAI"))
+    video = await service.bilibili_video(
+        BilibiliVideoRequest.model_validate({"url": "https://www.bilibili.com/video/BV1eaMH6gEDx/"})
+    )
+
+    assert search.items == ()
+    assert video.cid == 301
+    assert bridge.site_requests == [
+        (
+            "bilibili.fetch",
+            "search",
+            {"keyword": "OpenAI", "page": 1, "order": "totalrank"},
+        ),
+        (
+            "bilibili.fetch",
+            "video",
+            {"videoId": "BV1eaMH6gEDx", "page": 1},
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -386,8 +439,7 @@ async def test_platform_downloads_resolve_media_through_site_detail(tmp_path: Pa
         XhsDownloadRequest.model_validate(
             {
                 "url": (
-                    "https://www.xiaohongshu.com/explore/n1"
-                    "?xsec_token=token&xsec_source=pc_search"
+                    "https://www.xiaohongshu.com/explore/n1?xsec_token=token&xsec_source=pc_search"
                 ),
                 "media": "images",
             }

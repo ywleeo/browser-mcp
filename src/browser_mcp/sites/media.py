@@ -25,8 +25,13 @@ PLATFORM_HOST_SUFFIXES: Final = {
         ".byteimg.com",
         ".bytegoofy.com",
     ),
+    "bilibili": (".bilivideo.com", ".bilivideo.cn"),
 }
 CONTENT_EXTENSIONS: Final = {
+    "audio/aac": ".aac",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
     "image/avif": ".avif",
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -36,6 +41,8 @@ CONTENT_EXTENSIONS: Final = {
     "video/quicktime": ".mov",
     "video/webm": ".webm",
 }
+type MediaPlatform = Literal["xhs", "douyin", "bilibili"]
+type MediaKind = Literal["image", "video", "audio"]
 
 
 class MediaDownloadError(RuntimeError):
@@ -46,7 +53,7 @@ class MediaDownloadError(RuntimeError):
 class MediaSource:
     """One page-derived media URL and its normalized kind."""
 
-    kind: Literal["image", "video"]
+    kind: MediaKind
     url: str
 
 
@@ -70,7 +77,7 @@ class MediaDownloader:
     async def download(
         self,
         *,
-        platform: Literal["xhs", "douyin"],
+        platform: MediaPlatform,
         post_id: str,
         page_url: str,
         sources: tuple[MediaSource, ...],
@@ -88,6 +95,7 @@ class MediaDownloader:
             transport=self._transport,
             headers={
                 "Referer": page_url,
+                **({"Origin": "https://www.bilibili.com"} if platform == "bilibili" else {}),
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151 Safari/537.36"
@@ -119,7 +127,7 @@ class MediaDownloader:
         self,
         client: httpx.AsyncClient,
         *,
-        platform: Literal["xhs", "douyin"],
+        platform: MediaPlatform,
         post_id: str,
         source: MediaSource,
         index: int,
@@ -131,13 +139,13 @@ class MediaDownloader:
         response, final_url = await self._open_response(client, platform, source.url)
         try:
             content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            self._validate_content_type(source.kind, content_type)
+            self._validate_content_type(platform, source.kind, content_type)
             declared_size = _content_length(response)
             if declared_size is not None and declared_size > max_file_bytes:
                 raise MediaDownloadError(
                     f"media file exceeds {max_file_bytes} byte limit: {declared_size}"
                 )
-            extension = _media_extension(source.kind, content_type, final_url)
+            extension = _media_extension(platform, source.kind, content_type, final_url)
             stem = f"{platform}_{post_id}_{source.kind}_{index:02d}"
             target = _target_path(directory, stem, extension, overwrite)
             temporary = target.with_name(f".{target.name}.part")
@@ -172,7 +180,7 @@ class MediaDownloader:
     async def _open_response(
         self,
         client: httpx.AsyncClient,
-        platform: Literal["xhs", "douyin"],
+        platform: MediaPlatform,
         source_url: str,
     ) -> tuple[httpx.Response, str]:
         """Open one response while validating every redirect target."""
@@ -193,7 +201,7 @@ class MediaDownloader:
 
     async def _validate_media_url(
         self,
-        platform: Literal["xhs", "douyin"],
+        platform: MediaPlatform,
         url: str,
     ) -> None:
         """Require an approved platform CDN host and a globally routable address."""
@@ -202,6 +210,10 @@ class MediaDownloader:
         if not any(hostname == suffix[1:] or hostname.endswith(suffix) for suffix in suffixes):
             raise MediaDownloadError(f"unsupported {platform} media host: {hostname or 'missing'}")
         await self._url_policy.validate(url)
+
+    def resolve_directory(self, output_dir: str | None) -> Path:
+        """Resolve a caller-selected absolute directory or the application default."""
+        return self._directory(output_dir)
 
     def _directory(self, output_dir: str | None) -> Path:
         """Resolve a caller-selected absolute directory or the application default."""
@@ -213,8 +225,12 @@ class MediaDownloader:
         return directory
 
     @staticmethod
-    def _validate_content_type(kind: str, content_type: str) -> None:
+    def _validate_content_type(platform: str, kind: str, content_type: str) -> None:
         """Reject HTML, JSON, and mismatched media responses before writing."""
+        if platform == "bilibili" and content_type == "application/octet-stream":
+            return
+        if platform == "bilibili" and kind == "audio" and content_type == "video/mp4":
+            return
         if not content_type.startswith(f"{kind}/"):
             raise MediaDownloadError(
                 f"expected {kind} response but received {content_type or 'unknown content type'}"
@@ -235,8 +251,15 @@ def _content_length(response: httpx.Response) -> int | None:
     return value
 
 
-def _media_extension(kind: str, content_type: str, final_url: str) -> str:
+def _media_extension(
+    platform: MediaPlatform,
+    kind: MediaKind,
+    content_type: str,
+    final_url: str,
+) -> str:
     """Choose a stable extension from content type, then URL, then media kind."""
+    if platform == "bilibili" and kind == "audio" and content_type == "video/mp4":
+        return ".m4a"
     known = CONTENT_EXTENSIONS.get(content_type)
     if known is not None:
         return known
@@ -246,7 +269,11 @@ def _media_extension(kind: str, content_type: str, final_url: str) -> str:
     guessed = mimetypes.guess_extension(content_type)
     if guessed:
         return guessed
-    return ".jpg" if kind == "image" else ".mp4"
+    if kind == "image":
+        return ".jpg"
+    if kind == "audio":
+        return ".m4a"
+    return ".mp4"
 
 
 def _target_path(directory: Path, stem: str, extension: str, overwrite: bool) -> Path:

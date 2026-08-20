@@ -195,6 +195,113 @@ class WebSearchResult(BaseModel):
     items: tuple[WebSearchItem, ...]
 
 
+class BilibiliSearchOrder(StrEnum):
+    """Video order values supported by Bilibili's search endpoint."""
+
+    RELEVANCE = "totalrank"
+    MOST_PLAYED = "click"
+    LATEST = "pubdate"
+    MOST_DANMAKU = "dm"
+    MOST_COLLECTED = "stow"
+
+
+class BilibiliSearchRequest(BaseModel):
+    """Validated Bilibili video-search input."""
+
+    keyword: str = Field(min_length=1, max_length=200)
+    page: int = Field(default=1, ge=1, le=50)
+    order: BilibiliSearchOrder = BilibiliSearchOrder.RELEVANCE
+
+
+class BilibiliSearchItem(BaseModel):
+    """One normalized Bilibili video search result."""
+
+    index: int
+    bvid: str
+    aid: int
+    url: str
+    title: str
+    description: str
+    author: str
+    author_id: int
+    category: str
+    duration: str
+    published_at: str
+    published_at_ms: int | None
+    views: int
+    danmaku: int
+    favorites: int
+    comments: int
+    likes: int
+    cover_url: str
+    tags: tuple[str, ...]
+
+
+class BilibiliSearchResult(BaseModel):
+    """Normalized Bilibili video-search page."""
+
+    keyword: str
+    page: int
+    order: BilibiliSearchOrder
+    total: int
+    total_pages: int
+    has_more: bool
+    items: tuple[BilibiliSearchItem, ...]
+
+
+class BilibiliVideoRequest(BaseModel):
+    """Validated Bilibili BV/AV video URL with an optional multipart page."""
+
+    url: HttpUrl
+
+
+class BilibiliDownloadRequest(BaseModel):
+    """Validated Bilibili video or audio download request."""
+
+    url: HttpUrl
+    output_dir: str | None = Field(default=None, max_length=4_096)
+    overwrite: bool = False
+    max_file_mb: int = Field(default=2_048, ge=1, le=8_192)
+
+
+class BilibiliVideoPart(BaseModel):
+    """One page in a multipart Bilibili video."""
+
+    index: int
+    cid: int
+    title: str
+    duration_seconds: int
+    url: str
+
+
+class BilibiliVideoResult(BaseModel):
+    """Normalized Bilibili video metadata and multipart structure."""
+
+    bvid: str
+    aid: int
+    cid: int
+    page: int
+    url: str
+    title: str
+    description: str
+    category: str
+    cover_url: str
+    author: str
+    author_id: int
+    published_at: str
+    published_at_ms: int | None
+    duration_seconds: int
+    views: int
+    danmaku: int
+    comments: int
+    favorites: int
+    coins: int
+    shares: int
+    likes: int
+    tags: tuple[str, ...]
+    parts: tuple[BilibiliVideoPart, ...]
+
+
 class XSearchSort(StrEnum):
     """Search timelines exposed by the X web interface."""
 
@@ -461,6 +568,24 @@ class MediaDownloadResult(BaseModel):
 
     platform: str
     post_id: str
+    output_dir: str
+    downloaded: int
+    total_bytes: int
+    items: tuple[MediaDownloadItem, ...]
+
+
+class BilibiliDownloadResult(BaseModel):
+    """Bilibili download output, including whether DASH tracks were muxed."""
+
+    platform: str
+    post_id: str
+    cid: int
+    page: int
+    media: str
+    quality_id: int | None
+    quality_label: str
+    codec: str
+    muxed: bool
     output_dir: str
     downloaded: int
     total_bytes: int

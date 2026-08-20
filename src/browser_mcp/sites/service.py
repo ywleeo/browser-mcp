@@ -14,6 +14,14 @@ from browser_mcp.sites.auth import (
     parse_site_login_status,
     require_site_login,
 )
+from browser_mcp.sites.bilibili import (
+    BilibiliMediaStreams,
+    parse_bilibili_video_url,
+    select_bilibili_media_streams,
+    shape_bilibili_search,
+    shape_bilibili_video,
+)
+from browser_mcp.sites.bilibili_media import BilibiliMediaDownloader
 from browser_mcp.sites.douyin import (
     parse_douyin_aweme_url,
     shape_douyin_comments,
@@ -22,6 +30,12 @@ from browser_mcp.sites.douyin import (
 )
 from browser_mcp.sites.media import MediaDownloader, MediaSource
 from browser_mcp.sites.models import (
+    BilibiliDownloadRequest,
+    BilibiliDownloadResult,
+    BilibiliSearchRequest,
+    BilibiliSearchResult,
+    BilibiliVideoRequest,
+    BilibiliVideoResult,
     DouyinCommentsRequest,
     DouyinCommentsResult,
     DouyinDownloadRequest,
@@ -99,12 +113,14 @@ class SiteService:
         browser: BrowserService,
         snapshots: SiteSnapshotStore | None = None,
         media_downloader: MediaDownloader | None = None,
+        bilibili_media_downloader: BilibiliMediaDownloader | None = None,
     ) -> None:
         """Bind site use cases to the existing authenticated browser application port."""
         self._browser = browser
         self._snapshots = snapshots or SiteSnapshotStore()
-        self._media_downloader = media_downloader or MediaDownloader(
-            DEFAULT_DATA_DIR / "downloads"
+        self._media_downloader = media_downloader or MediaDownloader(DEFAULT_DATA_DIR / "downloads")
+        self._bilibili_media_downloader = bilibili_media_downloader or BilibiliMediaDownloader(
+            self._media_downloader
         )
 
     async def zhihu_search(self, request: ZhihuSearchRequest) -> ZhihuSearchResult:
@@ -167,6 +183,61 @@ class SiteService:
             timeout_seconds=45.0,
         )
         return parse_zhihu_invitations(raw, request.day)
+
+    async def bilibili_search(self, request: BilibiliSearchRequest) -> BilibiliSearchResult:
+        """Search Bilibili videos through the current Chrome session."""
+        raw = await self._browser.gateway.request(
+            "bilibili.fetch",
+            "search",
+            {
+                "keyword": request.keyword.strip(),
+                "page": request.page,
+                "order": request.order.value,
+            },
+            timeout_seconds=40.0,
+        )
+        return shape_bilibili_search(raw, request)
+
+    async def bilibili_video(self, request: BilibiliVideoRequest) -> BilibiliVideoResult:
+        """Read Bilibili metadata, statistics, tags, and multipart information."""
+        identity = parse_bilibili_video_url(str(request.url))
+        raw = await self._browser.gateway.request(
+            "bilibili.fetch",
+            "video",
+            {"videoId": identity.video_id, "page": identity.page},
+            timeout_seconds=40.0,
+        )
+        return shape_bilibili_video(raw, identity)
+
+    async def bilibili_download_video(
+        self,
+        request: BilibiliDownloadRequest,
+    ) -> BilibiliDownloadResult:
+        """Download and losslessly mux one Bilibili page's best compatible tracks."""
+        streams = await self._bilibili_media_streams(request)
+        return await self._bilibili_media_downloader.download_video(streams, request)
+
+    async def bilibili_download_audio(
+        self,
+        request: BilibiliDownloadRequest,
+    ) -> BilibiliDownloadResult:
+        """Download only one Bilibili page's best compatible audio track."""
+        streams = await self._bilibili_media_streams(request)
+        return await self._bilibili_media_downloader.download_audio(streams, request)
+
+    async def _bilibili_media_streams(
+        self,
+        request: BilibiliDownloadRequest,
+    ) -> BilibiliMediaStreams:
+        """Resolve page-owned DASH media URLs without exposing them as a general fetch API."""
+        identity = parse_bilibili_video_url(str(request.url))
+        raw = await self._browser.gateway.request(
+            "bilibili.fetch",
+            "media",
+            {"videoId": identity.video_id, "page": identity.page},
+            timeout_seconds=45.0,
+        )
+        return select_bilibili_media_streams(raw, identity)
 
     async def xhs_search(self, request: XhsSearchRequest) -> XhsSearchResult:
         """Navigate the signed Xiaohongshu search UI and normalize its response."""

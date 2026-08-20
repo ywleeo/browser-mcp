@@ -1,6 +1,6 @@
 # Browser MCP 分阶段实施计划
 
-> 状态：阶段 1—8 已实现；阶段 9 首版已验收，`0.10.0` 点赞/收藏增量等待真实账号验收
+> 状态：阶段 1—9 已实现；`0.11.0` B 站搜索、meta 与媒体下载增量已完成真实插件验收
 > 前置设计：[architecture.md](architecture.md)
 > 执行规则：每个阶段完成后停止开发，由用户验收；只有收到确认才进入下一阶段。
 
@@ -51,6 +51,7 @@
 | 7 | Reddit adapter | 帖子、评论、subreddit/search 列表 |
 | 8 | 搜索引擎 adapters | Google 先行，其他引擎逐个验收 |
 | 9 | 抖音 adapter | 搜索、视频/图文详情、评论、媒体下载及点赞/收藏；热门、精选后续增量 |
+| 9A | Bilibili adapter | 视频搜索、内容 meta、分 P、视频与纯音频下载 |
 | 10 | 淘宝 adapter | 搜索、商品详情 |
 | 11 | 微博 adapter | 搜索、帖子、评论与 Chrome fallback |
 | 12 | 本地发布体验 | 安装脚本、客户端配置、打包评估 |
@@ -307,28 +308,42 @@ MCP client 完成 `initialize → browser_read → browser_read_page` 全链路�
 - 抖音视频、抖音图文图片、小红书视频和小红书图片均完成真实 CDN 下载，并通过实际
   WebP/MP4 文件类型检查。
 
-## 13. 阶段 10：淘宝
+## 13. 阶段 9A：Bilibili 增量
+
+- `bilibili_search` 通过 Chrome 中的 B 站公开搜索接口获取视频结果，保留当前会话与平台
+  风控上下文，并支持综合、播放量、最新、弹幕量和收藏量排序。
+- `bilibili_video` 接受规范 BV/AV URL 和 `?p=N`，返回内容 meta、作者、发布时间、统计、
+  标签及所有分 P 的 CID、标题和时长。
+- 下载只接受详情页生成的 B 站 CDN URL。`bilibili_download_video` 选择最高可用画质中的
+  AVC 兼容轨，并与最佳常规音轨通过 FFmpeg stream copy 合并；无 FFmpeg 时返回分离轨道。
+  `bilibili_download_audio` 只下载音轨。
+- 真实扩展验收完成：11 秒样本下载为 2.53 MB MP4，`ffprobe` 识别 H.264 + AAC；纯音频
+  下载为 90 KB M4A，只包含 AAC 流。真实 smoke 文件在验证后从临时目录移除。
+
+## 14. 阶段 10：淘宝
 
 - 搜索与商品详情。
 - 使用真实登录态页面和 rendered DOM extractor。
 - selector 失败时输出诊断摘要，不把整页 HTML写入日志。
 
-## 14. 阶段 11：微博
+## 15. 阶段 11：微博
 
 - 搜索 HTML parser。
 - 帖子与评论 API。
 - 直连优先，Chrome rendered fallback。
 - Cookie/CSRF 不进入日志或持久化快照元数据。
 
-## 15. 阶段 12：本地发布体验
+## 16. 阶段 12：本地发布体验
 
 - README：Chrome extension 安装、Claude/Codex 配置、升级、排错。
 - 提供 `uv tool install`/`uvx` 运行方式。
 - 验证 macOS、Windows；Linux 保持 best-effort。
 - 评估 PyInstaller/standalone binary，但 extension 仍需释放到稳定目录。
 - 最终 smoke test 覆盖两个客户端同时运行和端口池分配。
+- stdio 正常 EOF 之外增加 MCP Host PID watchdog；跳过 `uv` wrapper，并在异常宿主退出后
+  自动释放端口。扩展收到 `bridge.shutdown` 或 WebSocket 断开后按端口回收隔离窗口。
 
-## 16. 明确延期项
+## 17. 明确延期项
 
 - page click/type/upload。
 - 任意 JavaScript eval。

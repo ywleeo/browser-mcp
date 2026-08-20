@@ -121,6 +121,25 @@ function failUrlChecksForState(state) {
   }
 }
 
+/** Remove only isolated interaction resources owned by one disconnected bridge port. */
+async function cleanupBridgeSessionsForPort(port) {
+  const prefix = `${port}:`;
+  const sessions = new Set([
+    ...[...interactiveTabs.keys()].filter((session) => session.startsWith(prefix)),
+    ...[...interactionWindows.keys()].filter((session) => session.startsWith(prefix)),
+    ...[...interactionDebuggers.keys()].filter((session) => session.startsWith(prefix)),
+    ...[...interactionQueues.keys()].filter((session) => session.startsWith(prefix)),
+  ]);
+  for (const session of sessions) {
+    const windowId = interactionWindows.get(session);
+    interactiveTabs.delete(session);
+    interactionWindows.delete(session);
+    interactionQueues.delete(session);
+    await closeInteractionDebugger(session);
+    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
+  }
+}
+
 /** Schedule one bounded exponential-backoff reconnect. */
 function scheduleReconnect(port, config, state) {
   if (state.disabled || state.timer) return;
@@ -175,6 +194,8 @@ function connectPort(port, config) {
       scheduleBrowserInteraction(state, message);
     } else if (message.type === "zhihu.fetch") {
       void dispatchZhihuFetch(state, message);
+    } else if (message.type === "bilibili.fetch") {
+      void dispatchBilibiliFetch(state, message);
     } else if (message.type === "xhs.fetch") {
       void dispatchXhsFetch(state, message);
     } else if (message.type === "xhs.mutate") {
@@ -183,14 +204,18 @@ function connectPort(port, config) {
       void dispatchDouyinFetch(state, message);
     } else if (message.type === "douyin.mutate") {
       void dispatchDouyinMutation(state, message);
+    } else if (message.type === "bridge.shutdown") {
+      void cleanupBridgeSessionsForPort(port);
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
   };
 
   socket.onclose = () => {
-    if (state.socket === socket) state.socket = null;
+    if (state.socket !== socket) return;
+    state.socket = null;
     failUrlChecksForState(state);
+    void cleanupBridgeSessionsForPort(port);
     scheduleReconnect(port, config, state);
   };
   socket.onerror = () => {};
@@ -206,6 +231,9 @@ function scheduleBrowserInteraction(state, message) {
   interactionQueues.set(session, current);
   void current.finally(() => {
     if (interactionQueues.get(session) === current) interactionQueues.delete(session);
+    if (state.socket?.readyState !== WebSocket.OPEN) {
+      void cleanupBridgeSessionsForPort(state.port);
+    }
   });
 }
 
@@ -410,6 +438,236 @@ async function collectXhrBodies(debuggerTarget, requests, responses) {
     }
   }
   return { entries, warnings };
+}
+
+/** Dispatch one allowlisted Bilibili read adapter through the current Chrome session. */
+async function dispatchBilibiliFetch(state, message) {
+  const reply = (payload) =>
+    sendJson(state, { type: "bilibili.fetch.result", id: message.id, ...payload });
+  if (message.action === "search") {
+    await runBilibiliSearch(state, message.args || {}, reply);
+  } else if (message.action === "video") {
+    await runBilibiliVideo(state, message.args || {}, false, reply);
+  } else if (message.action === "media") {
+    await runBilibiliVideo(state, message.args || {}, true, reply);
+  } else {
+    reply({ ok: false, error: `unsupported bilibili action: ${message.action}` });
+  }
+}
+
+/** Search Bilibili videos through its public API inside a short-lived Chrome tab. */
+async function runBilibiliSearch(state, args, reply) {
+  const keyword = String(args.keyword || "").trim();
+  if (!keyword) {
+    reply({ ok: false, error: "bilibili search keyword is required" });
+    return;
+  }
+  const page = Math.max(1, Math.min(50, Number(args.page) || 1));
+  const supportedOrders = new Set(["totalrank", "click", "pubdate", "dm", "stow"]);
+  const order = supportedOrders.has(String(args.order || ""))
+    ? String(args.order)
+    : "totalrank";
+  const apiTarget = new URL("https://api.bilibili.com/x/web-interface/search/type");
+  apiTarget.searchParams.set("search_type", "video");
+  apiTarget.searchParams.set("keyword", keyword);
+  apiTarget.searchParams.set("page", String(page));
+  apiTarget.searchParams.set("order", order);
+  const pageTarget = new URL("https://search.bilibili.com/video");
+  pageTarget.searchParams.set("keyword", keyword);
+  pageTarget.searchParams.set("page", String(page));
+  pageTarget.searchParams.set("order", order);
+  const [apiApproval, pageApproval] = await Promise.all([
+    requestUrlApproval(state, apiTarget.toString()),
+    requestUrlApproval(state, pageTarget.toString()),
+  ]);
+  if (!apiApproval.allowed || !pageApproval.allowed) {
+    const detail = apiApproval.error || pageApproval.error || "URL policy";
+    reply({ ok: false, error: `navigation blocked: ${detail}` });
+    return;
+  }
+
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: apiTarget.toString(), active: false });
+    tabId = tab.id;
+    if (tabId == null) throw new Error("Chrome did not create a Bilibili search tab");
+    await waitForTabComplete(tabId);
+    let result = await readBilibiliSearchApiTab(tabId);
+    if (!result?.data || result.data.code !== 0) {
+      await chrome.tabs.update(tabId, { url: pageTarget.toString() });
+      await waitForTabComplete(tabId);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      result = await readBilibiliSearchPageTab(tabId, page);
+    }
+    if (!result?.data) throw new Error(result?.error || "Bilibili search returned no data");
+    reply({ ok: true, data: result.data });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
+/** Decode one direct Bilibili search API tab without trusting non-JSON error pages. */
+async function readBilibiliSearchApiTab(tabId) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const text = document.querySelector("pre")?.textContent || document.body?.innerText || "";
+      try {
+        return { data: JSON.parse(text) };
+      } catch (error) {
+        return { error: `Bilibili search JSON could not be decoded: ${error?.message || error}` };
+      }
+    },
+  });
+  return result || { error: "Bilibili search API returned no script result" };
+}
+
+/** Normalize rendered Bilibili search cards when the public API applies HTTP 412 throttling. */
+async function readBilibiliSearchPageTab(tabId, page) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [page],
+    func: (selectedPage) => {
+      /** Parse one compact rendered statistic such as 17.1万 without locale globals. */
+      const count = (value) => {
+        const normalized = String(value || "").replace(/[,\s]/g, "");
+        const match = normalized.match(/([0-9]+(?:\.[0-9]+)?)(万|亿)?/);
+        if (!match) return 0;
+        const multiplier = match[2] === "亿" ? 100000000 : match[2] === "万" ? 10000 : 1;
+        return Math.round(Number(match[1]) * multiplier);
+      };
+      const cards = [...document.querySelectorAll(".bili-video-card")];
+      const items = cards.flatMap((card) => {
+        const anchor = card.querySelector('a[href*="/video/BV"]');
+        const href = anchor instanceof HTMLAnchorElement ? anchor.href : "";
+        const identity = href.match(/\/video\/(BV[0-9A-Za-z]{10})/);
+        if (!identity) return [];
+        const titleNode = card.querySelector(".bili-video-card__info--tit, h3[title]");
+        const authorNode = card.querySelector(
+          ".bili-video-card__info--author, .bili-video-card__info--owner",
+        );
+        const authorLink = authorNode?.closest("a[href]") || authorNode?.querySelector("a[href]");
+        const authorHref = authorLink instanceof HTMLAnchorElement ? authorLink.href : "";
+        const authorId = Number(authorHref.match(/space\.bilibili\.com\/(\d+)/)?.[1] || 0);
+        const statNodes = [...card.querySelectorAll(".bili-video-card__stats--item")];
+        const image = card.querySelector("img");
+        const imageUrl = image instanceof HTMLImageElement
+          ? image.currentSrc || image.src || image.getAttribute("data-src") || ""
+          : "";
+        return [{
+          bvid: identity[1],
+          aid: 0,
+          title: titleNode?.getAttribute("title") || titleNode?.textContent?.trim() || "",
+          description: "",
+          author: authorNode?.textContent?.replace(/\s*[·•].*$/, "").trim() || "",
+          mid: authorId,
+          typename: "",
+          duration: card.querySelector(".bili-video-card__stats__duration")?.textContent?.trim() || "",
+          pubdate: 0,
+          play: count(statNodes[0]?.textContent),
+          danmaku: count(statNodes[1]?.textContent),
+          favorites: 0,
+          review: 0,
+          like: 0,
+          pic: imageUrl.replace(/^http:/, "https:").split("@")[0],
+          tag: "",
+        }];
+      });
+      const pageNumbers = [...document.querySelectorAll(".vui_pagenation--btn-num")]
+        .map((node) => Number(node.textContent?.trim()))
+        .filter((value) => Number.isFinite(value));
+      const totalPages = Math.max(selectedPage, ...pageNumbers);
+      if (!items.length) return { error: "Bilibili rendered search page exposed no video cards" };
+      return {
+        data: {
+          code: 0,
+          message: "rendered fallback",
+          data: {
+            numResults: (selectedPage - 1) * 20 + items.length,
+            numPages: totalPages,
+            result: items,
+          },
+        },
+      };
+    },
+  });
+  return result || { error: "Bilibili rendered search returned no script result" };
+}
+
+/** Read Bilibili metadata and optional DASH playinfo for one selected multipart page. */
+async function runBilibiliVideo(state, args, includePlayinfo, reply) {
+  const videoId = String(args.videoId || "").trim();
+  if (!/^(?:BV[0-9A-Za-z]{10}|av\d+)$/.test(videoId)) {
+    reply({ ok: false, error: "bilibili videoId must be one canonical BV or AV id" });
+    return;
+  }
+  const page = Math.max(1, Math.min(1000, Number(args.page) || 1));
+  const target = new URL(`https://www.bilibili.com/video/${videoId}/`);
+  if (page > 1) target.searchParams.set("p", String(page));
+  const approval = await requestUrlApproval(state, target.toString());
+  if (!approval.allowed) {
+    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+    return;
+  }
+
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: target.toString(), active: false });
+    tabId = tab.id;
+    if (tabId == null) throw new Error("Chrome did not create a Bilibili video tab");
+    await waitForTabComplete(tabId);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [videoId, includePlayinfo],
+      func: async (requestedId, wantsPlayinfo) => {
+        const query = requestedId.startsWith("BV")
+          ? `bvid=${encodeURIComponent(requestedId)}`
+          : `aid=${encodeURIComponent(requestedId.slice(2))}`;
+        const fetchJson = async (url) => {
+          const response = await fetch(url, { credentials: "include" });
+          if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
+          return response.json();
+        };
+        try {
+          const [view, tags] = await Promise.all([
+            fetchJson(`https://api.bilibili.com/x/web-interface/view?${query}`),
+            fetchJson(`https://api.bilibili.com/x/tag/archive/tags?${query}`).catch(() => ({
+              code: -1,
+              data: [],
+            })),
+          ]);
+          let playinfo = null;
+          if (wantsPlayinfo) {
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+              playinfo = window.__playinfo__ || null;
+              if (playinfo?.data?.dash || playinfo?.data?.durl) break;
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            if (!playinfo?.data?.dash && !playinfo?.data?.durl) {
+              throw new Error("Bilibili page exposed no downloadable playinfo");
+            }
+          }
+          return { data: { view, tags, ...(wantsPlayinfo ? { playinfo } : {}) } };
+        } catch (error) {
+          return { error: String(error?.message || error) };
+        }
+      },
+    });
+    if (!result || result.error || !result.data) {
+      throw new Error(result?.error || "Bilibili video returned no data");
+    }
+    reply({ ok: true, data: result.data });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
+  } finally {
+    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+  }
 }
 
 /** Execute one visual action and always return the resulting screenshot and element map. */

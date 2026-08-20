@@ -35,6 +35,7 @@ PROBE_TIMEOUT_SECONDS: Final = 1.5
 KEEPALIVE_SECONDS: Final = 20.0
 FETCH_TIMEOUT_SECONDS: Final = 65.0
 INTERACTION_TIMEOUT_SECONDS: Final = 65.0
+SHUTDOWN_NOTIFY_TIMEOUT_SECONDS: Final = 1.0
 MAX_MESSAGE_BYTES: Final = 16 * 1024 * 1024
 INTERACTION_ACTIONS: Final = frozenset({"snapshot", "click", "scroll", "type", "press", "select"})
 
@@ -123,6 +124,14 @@ class BridgeManager:
             self._connection = None
             self._connection_metadata = None
         if connection is not None:
+            try:
+                async with self._send_lock:
+                    await asyncio.wait_for(
+                        connection.send(json.dumps({"type": "bridge.shutdown"})),
+                        timeout=SHUTDOWN_NOTIFY_TIMEOUT_SECONDS,
+                    )
+            except (ConnectionClosed, TimeoutError):
+                pass
             await connection.close(code=1001, reason="Browser MCP server stopping")
         self._fail_pending_pings()
         self._fail_pending_requests("Browser MCP server stopped before extension reply")
@@ -192,6 +201,7 @@ class BridgeManager:
     ) -> dict[str, Any]:
         """Send one allowlisted site adapter action through the authenticated extension."""
         if message_type not in {
+            "bilibili.fetch",
             "douyin.fetch",
             "douyin.mutate",
             "zhihu.fetch",
@@ -289,6 +299,7 @@ class BridgeManager:
                 if future is not None and not future.done():
                     future.set_result(True)
         elif message_type in {
+            "bilibili.fetch.result",
             "browser.fetch.result",
             "browser.interact.result",
             "douyin.fetch.result",

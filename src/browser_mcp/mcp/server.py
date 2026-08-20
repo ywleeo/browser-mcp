@@ -32,6 +32,13 @@ from browser_mcp.models import (
 from browser_mcp.sites import SiteService
 from browser_mcp.sites.media import MediaDownloader
 from browser_mcp.sites.models import (
+    BilibiliDownloadRequest,
+    BilibiliDownloadResult,
+    BilibiliSearchOrder,
+    BilibiliSearchRequest,
+    BilibiliSearchResult,
+    BilibiliVideoRequest,
+    BilibiliVideoResult,
     DouyinCommentsRequest,
     DouyinCommentsResult,
     DouyinDownloadRequest,
@@ -126,10 +133,11 @@ def create_server(
             "Ask for explicit user confirmation immediately before actions that publish, "
             "send, purchase, delete, or otherwise cause consequential external side effects. "
             "Use the "
-            "zhihu_*, xhs_*, douyin_*, x_*, and reddit_* tools for stable site-specific "
+            "zhihu_*, bilibili_*, xhs_*, douyin_*, x_*, and reddit_* tools for stable "
+            "site-specific "
             "structured results. Use google_search, bing_search, or sogou_search "
-            "when the user chooses a web search engine. Platform tools check login "
-            "before every task. If a tool reports that login is required, tell the "
+            "when the user chooses a web search engine. Authenticated platform tools "
+            "check login before every task. If a tool reports that login is required, tell the "
             "user to log in with the provided URL and do not retry until they confirm."
         ),
         version=__version__,
@@ -268,6 +276,54 @@ def create_server(
             {"day": resolved_day, "max_pages": max_pages}
         )
         return await websites.zhihu_invitations(request)
+
+    async def _bilibili_search(
+        keyword: str,
+        page: int = 1,
+        order: BilibiliSearchOrder = BilibiliSearchOrder.RELEVANCE,
+    ) -> BilibiliSearchResult:
+        """Search Bilibili videos and return normalized metadata."""
+        request = BilibiliSearchRequest(keyword=keyword, page=page, order=order)
+        return await websites.bilibili_search(request)
+
+    async def _bilibili_video(url: str) -> BilibiliVideoResult:
+        """Read one Bilibili BV/AV video and its selected multipart page metadata."""
+        request = BilibiliVideoRequest.model_validate({"url": url})
+        return await websites.bilibili_video(request)
+
+    async def _bilibili_download_video(
+        url: str,
+        output_dir: str | None = None,
+        overwrite: bool = False,
+        max_file_mb: int = 2_048,
+    ) -> BilibiliDownloadResult:
+        """Download one Bilibili page's video and companion audio tracks."""
+        request = BilibiliDownloadRequest.model_validate(
+            {
+                "url": url,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "max_file_mb": max_file_mb,
+            }
+        )
+        return await websites.bilibili_download_video(request)
+
+    async def _bilibili_download_audio(
+        url: str,
+        output_dir: str | None = None,
+        overwrite: bool = False,
+        max_file_mb: int = 2_048,
+    ) -> BilibiliDownloadResult:
+        """Download only one Bilibili page's best compatible audio track."""
+        request = BilibiliDownloadRequest.model_validate(
+            {
+                "url": url,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "max_file_mb": max_file_mb,
+            }
+        )
+        return await websites.bilibili_download_audio(request)
 
     async def _xhs_search(
         keyword: str,
@@ -591,6 +647,67 @@ def create_server(
             read_only_hint=True,
             destructive_hint=False,
             idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _bilibili_search,
+        name="bilibili_search",
+        description=(
+            "Search Bilibili videos through the current Chrome session and return titles, "
+            "authors, statistics, tags, durations, and canonical BV links."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _bilibili_video,
+        name="bilibili_video",
+        description=(
+            "Read one Bilibili BV/AV video with content metadata, author, statistics, tags, "
+            "and multipart page information. Use ?p=N to select one part."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _bilibili_download_video,
+        name="bilibili_download_video",
+        description=(
+            "Download one Bilibili BV/AV page's best compatible video and audio. When FFmpeg "
+            "is available the DASH tracks are losslessly muxed into MP4; otherwise both track "
+            "files are returned separately."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    server.add_tool(
+        _bilibili_download_audio,
+        name="bilibili_download_audio",
+        description=(
+            "Download only the highest-bandwidth compatible audio track from one Bilibili "
+            "BV/AV page. Use ?p=N to select one multipart page."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
             open_world_hint=True,
         ),
         structured_output=True,

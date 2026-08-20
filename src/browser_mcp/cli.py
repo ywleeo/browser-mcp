@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from browser_mcp.config import AppSettings
 from browser_mcp.logging_config import configure_logging
 from browser_mcp.mcp.server import create_server
+from browser_mcp.process_lifecycle import start_owner_watchdog
 from browser_mcp.upgrade import (
     UpgradeError,
     apply_upgrade,
@@ -59,4 +60,5 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     settings = AppSettings.from_env()
     configure_logging(settings.log_level)
+    start_owner_watchdog()
     create_server(settings).run(transport="stdio")

@@ -34,6 +34,40 @@ def _display_url(value: object) -> object:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
+def _bilibili_duration_seconds(value: object) -> int:
+    """Convert a Bilibili search duration such as 1:02:03 into seconds."""
+    try:
+        parts = [int(part) for part in str(value).split(":")]
+    except ValueError:
+        return 1_000_000_000
+    if not 1 <= len(parts) <= 3:
+        return 1_000_000_000
+    return sum(part * 60**power for power, part in enumerate(reversed(parts)))
+
+
+async def _find_bilibili_short_video(session: ClientSession) -> str:
+    """Find one current short Bilibili video to keep real download smoke tests bounded."""
+    for keyword in ("10秒 短视频", "15秒 短视频", "短视频 测试"):
+        result = await session.call_tool(
+            "bilibili_search",
+            {"keyword": keyword, "page": 1, "order": "pubdate"},
+        )
+        if result.is_error:
+            continue
+        data = cast(dict[str, Any], result.structured_content or {})
+        items = data.get("items")
+        if not isinstance(items, list):
+            continue
+        for raw_item in cast(list[object], items):
+            if not isinstance(raw_item, dict):
+                continue
+            item = cast(dict[str, object], raw_item)
+            url = item.get("url")
+            if isinstance(url, str) and _bilibili_duration_seconds(item.get("duration")) <= 30:
+                return url
+    raise RuntimeError("no current Bilibili video under 30 seconds was found")
+
+
 async def _find_xhs_media_url(session: ClientSession, media: str) -> str:
     """Find one current XHS media note and retain its runtime-generated access URL."""
     if media == "video":
@@ -82,6 +116,8 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "douyin-search",
             "douyin-first",
             "douyin-comments",
+            "bilibili",
+            "bilibili-download",
             "download",
             "download-matrix",
             "download-douyin-note",
@@ -128,6 +164,8 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
         if "downloaded" in data:
             summary["downloaded"] = data.get("downloaded")
             summary["total_bytes"] = data.get("total_bytes")
+            summary["muxed"] = data.get("muxed")
+            summary["quality_label"] = data.get("quality_label")
             if items and isinstance(items[0], dict):
                 summary["first_path"] = items[0].get("path")
         if name.endswith("_comments"):
@@ -159,8 +197,11 @@ def _print_result(name: str, result: CallToolResult) -> dict[str, Any]:
         summary["kind"] = data.get("kind") or data.get("note_type")
         summary["complete"] = data.get("complete")
         summary["image_count"] = len(data.get("images") or [])
-        if "comments" in data:
-            summary["comments_returned"] = len(data.get("comments") or [])
+        comments = data.get("comments")
+        if isinstance(comments, list):
+            summary["comments_returned"] = len(comments)
+        elif comments is not None:
+            summary["comments"] = comments
     elif "post_id" in data:
         summary["post_id"] = data.get("post_id")
         summary["url"] = _display_url(data.get("url"))
@@ -362,6 +403,41 @@ async def _run(site: str) -> None:
                     },
                 )
                 _print_result("douyin_comments", comments)
+            if site in {"all", "bilibili"}:
+                result = await session.call_tool(
+                    "bilibili_search",
+                    {"keyword": "OpenAI", "page": 1},
+                )
+                data = _print_result("bilibili_search", result)
+                items = data.get("items")
+                if isinstance(items, list) and items and isinstance(items[0], dict):
+                    video = await session.call_tool(
+                        "bilibili_video",
+                        {"url": items[0].get("url")},
+                    )
+                    _print_result("bilibili_video", video)
+            if site == "bilibili-download":
+                with TemporaryDirectory(prefix="browser-mcp-bilibili-smoke-") as temporary:
+                    url = await _find_bilibili_short_video(session)
+                    destination = Path(temporary)
+                    video = await session.call_tool(
+                        "bilibili_download_video",
+                        {
+                            "url": url,
+                            "output_dir": str(destination / "video"),
+                            "max_file_mb": 64,
+                        },
+                    )
+                    _print_result("bilibili_download_video", video)
+                    audio = await session.call_tool(
+                        "bilibili_download_audio",
+                        {
+                            "url": url,
+                            "output_dir": str(destination / "audio"),
+                            "max_file_mb": 64,
+                        },
+                    )
+                    _print_result("bilibili_download_audio", audio)
             if site in {"douyin-first"}:
                 first_url = "https://www.douyin.com/video/7478048831087725875"
                 download = await session.call_tool(
@@ -461,14 +537,18 @@ async def _run(site: str) -> None:
                     )
                     douyin_data = _print_result("douyin_search[note]", douyin_search)
                     douyin_items = douyin_data.get("items")
-                    note_item = next(
-                        (
-                            item
-                            for item in douyin_items
-                            if isinstance(item, dict) and item.get("aweme_type") == "note"
-                        ),
-                        None,
-                    ) if isinstance(douyin_items, list) else None
+                    note_item = (
+                        next(
+                            (
+                                item
+                                for item in douyin_items
+                                if isinstance(item, dict) and item.get("aweme_type") == "note"
+                            ),
+                            None,
+                        )
+                        if isinstance(douyin_items, list)
+                        else None
+                    )
                     if isinstance(note_item, dict):
                         douyin_images = await session.call_tool(
                             "douyin_download",
@@ -580,8 +660,7 @@ async def _run(site: str) -> None:
                 matching_checkbox = [
                     element
                     for element in cast(list[dict[str, Any]], data.get("elements") or [])
-                    if element.get("role") == "checkbox"
-                    and element.get("name") == checkbox_name
+                    if element.get("role") == "checkbox" and element.get("name") == checkbox_name
                 ]
                 if not matching_checkbox or (
                     matching_checkbox[0].get("checked") is checkbox_before.get("checked")
@@ -591,10 +670,8 @@ async def _run(site: str) -> None:
                 result = await session.call_tool(
                     "browser_click",
                     {
-                        "x": float(coordinate_target["x"])
-                        + float(coordinate_target["width"]) / 2,
-                        "y": float(coordinate_target["y"])
-                        + float(coordinate_target["height"]) / 2,
+                        "x": float(coordinate_target["x"]) + float(coordinate_target["width"]) / 2,
+                        "y": float(coordinate_target["y"]) + float(coordinate_target["height"]) / 2,
                     },
                 )
                 data = _print_visual_result("browser_click[coordinate]", result)

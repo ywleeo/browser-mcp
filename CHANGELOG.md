@@ -6,6 +6,35 @@
 
 暂无。
 
+## [0.11.0] - 2026-08-20
+
+### 新增
+
+- 新增 `bilibili_search` 与 `bilibili_video`，通过当前 Chrome 会话搜索 B 站视频并读取
+  BV/AV 标识、内容 meta、作者、标签、互动统计及分 P 信息。
+- 新增 `bilibili_download_video` 与 `bilibili_download_audio`，支持指定 `?p=N` 下载分 P
+  视频，或只保存最佳兼容音轨。
+- 新增独立 `bilibili.fetch` 扩展协议和 `sites/bilibili*.py` adapter，不把 B 站 API、
+  DASH 选择或 FFmpeg 编排混入其他平台模块。
+
+### 改进
+
+- B 站 DASH 下载优先最高可用画质和 AVC 兼容轨；检测到 FFmpeg 时使用 stream copy 无损
+  合并画面与音频，未安装 FFmpeg 时明确返回两个独立轨道。
+- B 站公开搜索 API 遇到 HTTP 412 风控时自动回退到真实搜索结果页，并对重复渲染卡片按
+  BV 标识去重。
+- 共享媒体下载器增加 B 站 CDN、Referer/Origin、音频 MP4 容器和 `.m4a` 扩展名兼容，
+  保留逐跳 URL 校验、大小限制、SHA-256 与原子发布。
+- MCP 服务新增 owner watchdog：自动跳过 `uv` wrapper 监控真实宿主，宿主异常退出且 stdin
+  未正常关闭时仍能终止服务并释放 bridge 端口。
+- 正常关闭会先发送 `bridge.shutdown`；扩展在显式关闭或 WebSocket 断开后按端口清理隔离
+  交互窗口、队列和 debugger，不关闭用户原有标签页。
+
+### 验证
+
+- 已用真实扩展会话完成搜索、meta、视频和纯音频下载；测试 MP4 经 `ffprobe` 确认包含
+  H.264 + AAC，纯音频 M4A 只包含 AAC。
+
 ## [0.10.0] - 2026-08-19
 
 ### 新增
