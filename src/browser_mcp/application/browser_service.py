@@ -140,8 +140,11 @@ class BrowserService:
         return await self._interact("snapshot", args)
 
     async def click(self, request: BrowserClickRequest) -> BrowserVisualResult:
-        """Click one referenced element or viewport coordinate and return the new page state."""
-        return await self._interact("click", request.model_dump(exclude_none=True))
+        """Click one referenced element or visual coordinate and return the new page state."""
+        return await self._interact(
+            "click",
+            request.model_dump(exclude_none=True, mode="json"),
+        )
 
     async def scroll(self, request: BrowserScrollRequest) -> BrowserVisualResult:
         """Scroll the managed tab relatively or to one referenced element."""

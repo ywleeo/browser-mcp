@@ -121,6 +121,8 @@ class BrowserViewport(BaseModel):
 
     width: int = Field(ge=1)
     height: int = Field(ge=1)
+    screenshot_width: int | None = Field(default=None, ge=1)
+    screenshot_height: int | None = Field(default=None, ge=1)
     device_scale_factor: float = Field(gt=0)
     scroll_x: int = Field(ge=0)
     scroll_y: int = Field(ge=0)
@@ -155,12 +157,20 @@ class BrowserSnapshotRequest(BaseModel):
     wait_ms: int = Field(default=500, ge=0, le=30_000)
 
 
+class BrowserClickCoordinateSpace(StrEnum):
+    """Coordinate systems accepted by visual browser clicks."""
+
+    SCREENSHOT = "screenshot"
+    VIEWPORT = "viewport"
+
+
 class BrowserClickRequest(BaseModel):
-    """Validated element-reference or viewport-coordinate click request."""
+    """Validated element-reference or screenshot/viewport-coordinate click request."""
 
     element_id: str | None = Field(default=None, min_length=1, max_length=32)
     x: float | None = Field(default=None, ge=0)
     y: float | None = Field(default=None, ge=0)
+    coordinate_space: BrowserClickCoordinateSpace = BrowserClickCoordinateSpace.SCREENSHOT
     wait_ms: int = Field(default=500, ge=0, le=30_000)
 
     @model_validator(mode="after")

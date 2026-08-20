@@ -33,6 +33,7 @@ const interactionWindows = new Map();
 const interactionQueues = new Map();
 const interactionDebuggers = new Map();
 const lastScreenshotAt = new Map();
+const lastInteractionScreenshots = new Map();
 
 /** Load server-generated pairing data embedded in the unpacked directory. */
 async function loadPairingConfig() {
@@ -129,12 +130,14 @@ async function cleanupBridgeSessionsForPort(port) {
     ...[...interactionWindows.keys()].filter((session) => session.startsWith(prefix)),
     ...[...interactionDebuggers.keys()].filter((session) => session.startsWith(prefix)),
     ...[...interactionQueues.keys()].filter((session) => session.startsWith(prefix)),
+    ...[...lastInteractionScreenshots.keys()].filter((session) => session.startsWith(prefix)),
   ]);
   for (const session of sessions) {
     const windowId = interactionWindows.get(session);
     interactiveTabs.delete(session);
     interactionWindows.delete(session);
     interactionQueues.delete(session);
+    lastInteractionScreenshots.delete(session);
     await closeInteractionDebugger(session);
     if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
   }
@@ -699,7 +702,11 @@ async function dispatchBrowserInteraction(state, message) {
       }
     }
 
-    const navigationTarget = await interactionNavigationTarget(tabId, action, args);
+    const screenshotMetrics = lastInteractionScreenshots.get(session) || null;
+    const clickPoint = action === "click" && !args.element_id
+      ? interactionClickPoint(args, screenshotMetrics)
+      : null;
+    const navigationTarget = await interactionNavigationTarget(tabId, action, args, clickPoint);
     if (navigationTarget) {
       const approval = await requestUrlApproval(state, navigationTarget);
       if (!approval.allowed) {
@@ -707,7 +714,7 @@ async function dispatchBrowserInteraction(state, message) {
       }
     }
     const currentTab = await chrome.tabs.get(tabId);
-    const needsDebugger = (
+    const needsDebugger = action === "click" || (
       action === "snapshot"
       && args.url != null
       && String(currentTab.url || "") !== String(args.url)
@@ -719,7 +726,13 @@ async function dispatchBrowserInteraction(state, message) {
     }
 
     stage = "execute action";
-    await executeInteractionAction(tabId, action, args);
+    await executeInteractionAction(
+      tabId,
+      action,
+      args,
+      debuggerSession?.target || null,
+      clickPoint,
+    );
     stage = "wait for page";
     await settleInteractionTab(tabId, boundedWait(args.wait_ms, action === "snapshot" ? 500 : 300));
     if (debuggerSession) await Promise.all([...debuggerSession.guardTasks]);
@@ -739,8 +752,14 @@ async function dispatchBrowserInteraction(state, message) {
       await closeInteractionDebugger(session);
       debuggerSession = null;
     }
-    const screenshotData = await captureInteractionScreenshot(tabId, session);
-    const visual = await captureInteractionState(tabId, action, screenshotData);
+    const screenshot = await captureInteractionScreenshot(tabId, session);
+    const visual = await captureInteractionState(tabId, action, screenshot);
+    lastInteractionScreenshots.set(session, {
+      width: screenshot.width,
+      height: screenshot.height,
+      viewportWidth: visual.state.viewport.width,
+      viewportHeight: visual.state.viewport.height,
+    });
     reply({ ok: true, data: visual });
   } catch (error) {
     if (debuggerSession) await closeInteractionDebugger(session);
@@ -748,16 +767,48 @@ async function dispatchBrowserInteraction(state, message) {
   }
 }
 
+/** Convert one screenshot or viewport coordinate into a current CSS viewport point. */
+function interactionClickPoint(args, screenshotMetrics) {
+  const x = Number(args.x);
+  const y = Number(args.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error("browser_click requires finite x and y coordinates");
+  }
+  const coordinateSpace = String(args.coordinate_space || "screenshot");
+  if (coordinateSpace === "viewport") return { x, y };
+  if (coordinateSpace !== "screenshot") {
+    throw new Error(`unsupported click coordinate space: ${coordinateSpace}`);
+  }
+  if (
+    !screenshotMetrics
+    || screenshotMetrics.width <= 0
+    || screenshotMetrics.height <= 0
+    || screenshotMetrics.viewportWidth <= 0
+    || screenshotMetrics.viewportHeight <= 0
+  ) {
+    throw new Error("screenshot coordinates require a fresh browser_snapshot");
+  }
+  if (x < 0 || y < 0 || x >= screenshotMetrics.width || y >= screenshotMetrics.height) {
+    throw new Error(
+      `click coordinate is outside screenshot ${screenshotMetrics.width}x${screenshotMetrics.height}`,
+    );
+  }
+  return {
+    x: x * screenshotMetrics.viewportWidth / screenshotMetrics.width,
+    y: y * screenshotMetrics.viewportHeight / screenshotMetrics.height,
+  };
+}
+
 /** Return the explicit anchor or form destination associated with one interaction. */
-async function interactionNavigationTarget(tabId, action, args) {
+async function interactionNavigationTarget(tabId, action, args, clickPoint = null) {
   if (action === "snapshot" && typeof args.url === "string") return args.url;
   const maySubmit = action === "click"
     || (action === "type" && args.submit === true)
     || (action === "press" && args.key === "Enter");
   if (!maySubmit) return null;
   const elementId = typeof args.element_id === "string" ? args.element_id : null;
-  const x = Number.isFinite(args.x) ? Number(args.x) : null;
-  const y = Number.isFinite(args.y) ? Number(args.y) : null;
+  const x = clickPoint && Number.isFinite(clickPoint.x) ? Number(clickPoint.x) : null;
+  const y = clickPoint && Number.isFinite(clickPoint.y) ? Number(clickPoint.y) : null;
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -875,12 +926,14 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
       ) return existing;
       if (needsIsolatedTab) {
         interactiveTabs.delete(session);
+        lastInteractionScreenshots.delete(session);
         await closeInteractionDebugger(session);
       } else if (!(action === "snapshot" && typeof requestedUrl === "string")) {
         throw new Error("managed tab is no longer on a public webpage; provide url to browser_snapshot");
       } else {
         interactiveTabs.delete(session);
         interactionWindows.delete(session);
+        lastInteractionScreenshots.delete(session);
         await closeInteractionDebugger(session);
         if (isolatedWindowId === existing.windowId) {
           await chrome.tabs.remove(existingTabId).catch(() => {});
@@ -889,6 +942,7 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
     } catch {
       interactiveTabs.delete(session);
       interactionWindows.delete(session);
+      lastInteractionScreenshots.delete(session);
     }
   }
   if (action !== "snapshot") {
@@ -918,7 +972,7 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
 }
 
 /** Execute the requested action while the debugger navigation guard is attached. */
-async function executeInteractionAction(tabId, action, args) {
+async function executeInteractionAction(tabId, action, args, debuggerTarget, clickPoint) {
   if (action === "snapshot") {
     if (args.url != null) {
       const url = String(args.url);
@@ -931,7 +985,7 @@ async function executeInteractionAction(tabId, action, args) {
     return;
   }
   if (action === "click") {
-    await executeDomClick(tabId, args);
+    await executeDomClick(tabId, args, debuggerTarget, clickPoint);
     return;
   }
   if (action === "scroll") {
@@ -967,37 +1021,70 @@ async function executeInteractionAction(tabId, action, args) {
   }
 }
 
-/** Click a referenced or coordinate-located element through its native DOM activation path. */
-async function executeDomClick(tabId, args) {
+/** Resolve a live DOM hit point, then send exactly one trusted Chrome mouse click. */
+async function executeDomClick(tabId, args, debuggerTarget, clickPoint) {
+  if (!debuggerTarget) throw new Error("trusted click requires an attached Chrome debugger");
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [args.element_id || null, args.x ?? null, args.y ?? null],
-    func: (elementId, x, y) => {
+    args: [args.element_id || null, clickPoint?.x ?? null, clickPoint?.y ?? null],
+    func: async (elementId, x, y) => {
+      const interactiveSelector = [
+        "button", "input", "textarea", "select", "a[href]", "label", "summary",
+        "[contenteditable='true']", "[role='button']", "[role='link']", "[role='checkbox']",
+        "[role='radio']", "[role='tab']", "[role='menuitem']", "[role='option']",
+        "[role='switch']", "[onclick]",
+      ].join(",");
+      const describe = (candidate) => {
+        if (!(candidate instanceof Element)) return "nothing";
+        const id = candidate.id ? `#${candidate.id}` : "";
+        const role = candidate.getAttribute("role");
+        return `${candidate.tagName.toLowerCase()}${id}${role ? `[role=${role}]` : ""}`;
+      };
+      const supportsPoint = (target, point) => {
+        const hit = document.elementFromPoint(point.x, point.y);
+        return hit instanceof Element && (hit === target || target.contains(hit));
+      };
+      const visibleRects = (target) => [...target.getClientRects()]
+        .map((rect) => ({
+          left: Math.max(0, rect.left),
+          top: Math.max(0, rect.top),
+          right: Math.min(innerWidth, rect.right),
+          bottom: Math.min(innerHeight, rect.bottom),
+        }))
+        .filter((rect) => rect.right - rect.left > 2 && rect.bottom - rect.top > 2);
+      const candidatePoints = (rect) => {
+        const insetX = Math.min(8, (rect.right - rect.left) / 4);
+        const insetY = Math.min(8, (rect.bottom - rect.top) / 4);
+        const centerX = (rect.left + rect.right) / 2;
+        const centerY = (rect.top + rect.bottom) / 2;
+        return [
+          { x: centerX, y: centerY },
+          { x: rect.left + insetX, y: rect.top + insetY },
+          { x: rect.right - insetX, y: rect.top + insetY },
+          { x: rect.left + insetX, y: rect.bottom - insetY },
+          { x: rect.right - insetX, y: rect.bottom - insetY },
+        ];
+      };
       let element = null;
       if (elementId) {
         const escaped = CSS.escape(elementId);
         element = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
         if (!element) return { error: `element reference is stale: ${elementId}; take a new snapshot` };
         element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+        await Promise.race([
+          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+          new Promise((resolve) => setTimeout(resolve, 100)),
+        ]);
+        if (!element.isConnected) {
+          return { error: `element reference became stale while scrolling: ${elementId}` };
+        }
       } else if (Number.isFinite(x) && Number.isFinite(y)) {
         if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {
           return { error: `click coordinate is outside viewport ${innerWidth}x${innerHeight}` };
         }
-        const referenced = [...document.querySelectorAll("[data-browser-mcp-ref]")]
-          .filter((candidate) => {
-            const rect = candidate.getBoundingClientRect();
-            return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-          })
-          .sort((left, right) => {
-            const leftRect = left.getBoundingClientRect();
-            const rightRect = right.getBoundingClientRect();
-            return leftRect.width * leftRect.height - rightRect.width * rightRect.height;
-          });
         const hit = document.elementFromPoint(x, y);
-        element = referenced[0] || hit?.closest(
-          "button,input,textarea,select,a[href],label,[role='button'],[role='link'],[onclick]",
-        ) || hit;
+        element = hit?.closest(interactiveSelector) || hit;
         if (!element) return { error: `no element found at viewport coordinate ${x},${y}` };
       } else {
         return { error: "browser_click requires element_id or non-negative x and y" };
@@ -1005,21 +1092,31 @@ async function executeDomClick(tabId, args) {
       if (("disabled" in element && element.disabled) || element.getAttribute("aria-disabled") === "true") {
         return { error: `element is disabled: ${elementId || `${x},${y}`}` };
       }
-      if (element instanceof HTMLElement) {
-        element.focus({ preventScroll: true });
-        element.click();
-      } else {
-        element.dispatchEvent(new MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window,
-        }));
+      if (!elementId) {
+        return {
+          point: { x, y },
+          target: describe(element),
+        };
       }
-      return { ok: true };
+      for (const rect of visibleRects(element)) {
+        const point = candidatePoints(rect).find((candidate) => supportsPoint(element, candidate));
+        if (point) return { point, target: describe(element) };
+      }
+      const rect = element.getBoundingClientRect();
+      const attempted = {
+        x: Math.max(0, Math.min(innerWidth - 1, (rect.left + rect.right) / 2)),
+        y: Math.max(0, Math.min(innerHeight - 1, (rect.top + rect.bottom) / 2)),
+      };
+      return {
+        error: `element is not hit-testable; obscured by ${describe(document.elementFromPoint(
+          attempted.x,
+          attempted.y,
+        ))}`,
+      };
     },
   });
   if (!result || result.error) throw new Error(result?.error || "click failed");
+  await dispatchTrustedPointClick(debuggerTarget, result.point);
 }
 
 /** Apply one bounded keyboard behavior and dispatch matching DOM keyboard events. */
@@ -1245,11 +1342,17 @@ async function captureInteractionScreenshot(tabId, session) {
   const separator = dataUrl.indexOf(",");
   const screenshotData = separator >= 0 ? dataUrl.slice(separator + 1) : "";
   if (!screenshotData) throw new Error("Chrome returned no screenshot data");
-  return screenshotData;
+  const blob = await (await fetch(dataUrl)).blob();
+  const bitmap = await createImageBitmap(blob);
+  const width = bitmap.width;
+  const height = bitmap.height;
+  bitmap.close();
+  if (width <= 0 || height <= 0) throw new Error("Chrome returned an invalid screenshot size");
+  return { data: screenshotData, width, height };
 }
 
 /** Extract a fresh element map after the guarded action and screenshot have completed. */
-async function captureInteractionState(tabId, action, screenshotData) {
+async function captureInteractionState(tabId, action, screenshot) {
   let execution;
   try {
     execution = await chrome.scripting.executeScript({
@@ -1372,13 +1475,15 @@ async function captureInteractionState(tabId, action, screenshotData) {
   }
   const [{ result: page } = {}] = execution;
   if (!page || typeof page.url !== "string") throw new Error("page snapshot script returned no data");
+  page.viewport.screenshot_width = screenshot.width;
+  page.viewport.screenshot_height = screenshot.height;
   return {
     state: {
       action,
       ...page,
       screenshot_mime_type: "image/jpeg",
     },
-    screenshot_data: screenshotData,
+    screenshot_data: screenshot.data,
   };
 }
 
@@ -3188,6 +3293,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (managedTabId !== tabId) continue;
     interactiveTabs.delete(session);
     interactionWindows.delete(session);
+    lastInteractionScreenshots.delete(session);
     void closeInteractionDebugger(session);
   }
 });

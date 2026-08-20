@@ -135,6 +135,9 @@ async def test_browser_snapshot_returns_native_image_elements_and_structured_sta
     assert result.structured_content is not None
     state = cast(dict[str, object], result.structured_content)
     assert state["action"] == "snapshot"
+    viewport = cast(dict[str, object], state["viewport"])
+    assert viewport["screenshot_width"] == 2560
+    assert viewport["screenshot_height"] == 1440
     assert cast(list[dict[str, object]], state["elements"])[0]["element_id"] == "e1"
     assert bridge.interactions == [
         ("snapshot", {"wait_ms": 500, "url": "https://example.com/form"})

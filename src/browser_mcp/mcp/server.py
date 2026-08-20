@@ -14,6 +14,7 @@ from browser_mcp import __version__
 from browser_mcp.application import BrowserService
 from browser_mcp.config import AppSettings
 from browser_mcp.models import (
+    BrowserClickCoordinateSpace,
     BrowserClickRequest,
     BrowserPressKey,
     BrowserPressRequest,
@@ -188,10 +189,17 @@ def create_server(
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        coordinate_space: BrowserClickCoordinateSpace = BrowserClickCoordinateSpace.SCREENSHOT,
         wait_ms: int = 500,
     ) -> CallToolResult:
-        """Click one current element reference or a CSS-pixel viewport coordinate."""
-        request = BrowserClickRequest(element_id=element_id, x=x, y=y, wait_ms=wait_ms)
+        """Click one current element reference or screenshot/viewport coordinate."""
+        request = BrowserClickRequest(
+            element_id=element_id,
+            x=x,
+            y=y,
+            coordinate_space=coordinate_space,
+            wait_ms=wait_ms,
+        )
         return _visual_tool_result(await browser_service.click(request))
 
     async def _browser_scroll(
@@ -532,8 +540,9 @@ def create_server(
         _browser_click,
         name="browser_click",
         description=(
-            "Click a current browser_snapshot element_id; use viewport coordinates only "
-            "when no semantic element reference is available."
+            "Send one trusted Chrome click to a current browser_snapshot element_id. When "
+            "no semantic reference is available, x/y default to pixels in the returned "
+            "screenshot; set coordinate_space=viewport only for CSS viewport coordinates."
         ),
         annotations=ToolAnnotations(
             read_only_hint=False,

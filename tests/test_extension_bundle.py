@@ -43,6 +43,14 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "chrome.tabs.update(tabId, { url })" in background
     assert "refusing to activate an interaction tab in the user's current window" in background
     assert "async function executeDomClick" in background
+    click_implementation = background.split("async function executeDomClick", 1)[1].split(
+        "/** Apply one bounded keyboard behavior", 1
+    )[0]
+    assert ".click()" not in click_implementation
+    assert "await dispatchTrustedPointClick(debuggerTarget, result.point)" in click_implementation
+    assert 'const needsDebugger = action === "click" || (' in background
+    assert 'String(args.coordinate_space || "screenshot")' in background
+    assert "createImageBitmap(blob)" in background
     assert 'new InputEvent("input"' in background
     assert 'referenceAttribute = "data-browser-mcp-ref"' in background
     assert "crypto.randomUUID().slice(0, 8)" in background

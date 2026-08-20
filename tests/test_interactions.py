@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from browser_mcp.application.browser_service import BrowserService
 from browser_mcp.config import AppSettings
 from browser_mcp.models import (
+    BrowserClickCoordinateSpace,
     BrowserClickRequest,
     BrowserPressKey,
     BrowserPressRequest,
@@ -23,7 +24,14 @@ from tests.helpers import FakeBridge, allow_public_url_policy
 def test_click_request_requires_exactly_one_target_strategy() -> None:
     """Clicks must never guess between absent, partial, or conflicting targets."""
     assert BrowserClickRequest(element_id="e1").element_id == "e1"
-    assert BrowserClickRequest(x=12, y=34).x == 12
+    screenshot_click = BrowserClickRequest(x=12, y=34)
+    assert screenshot_click.x == 12
+    assert screenshot_click.coordinate_space is BrowserClickCoordinateSpace.SCREENSHOT
+    assert BrowserClickRequest(
+        x=12,
+        y=34,
+        coordinate_space=BrowserClickCoordinateSpace.VIEWPORT,
+    ).coordinate_space is BrowserClickCoordinateSpace.VIEWPORT
     with pytest.raises(ValidationError, match="either element_id or both x and y"):
         BrowserClickRequest()
     with pytest.raises(ValidationError, match="x and y must be provided together"):
@@ -65,4 +73,5 @@ async def test_browser_service_dispatches_every_visual_action_with_typed_argumen
         "select",
     ]
     assert bridge.interactions[2][1]["direction"] == "down"
+    assert bridge.interactions[1][1]["coordinate_space"] == "screenshot"
     assert bridge.interactions[4][1]["key"] == "Enter"

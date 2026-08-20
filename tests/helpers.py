@@ -162,6 +162,8 @@ class FakeBridge:
                 viewport=BrowserViewport(
                     width=1280,
                     height=720,
+                    screenshot_width=2560,
+                    screenshot_height=1440,
                     device_scale_factor=2,
                     scroll_x=0,
                     scroll_y=0,
