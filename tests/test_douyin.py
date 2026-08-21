@@ -176,3 +176,48 @@ def test_shape_douyin_comments_flattens_replies_and_honors_limit() -> None:
     assert result.items[1].root_comment_id == "c1"
     assert result.items[1].parent_comment_id == "c1"
     assert result.items[1].depth == 1
+    assert result.session_id is None
+    assert result.budget_exhausted is False
+
+
+def test_shape_douyin_comments_keeps_resume_ticket_for_a_budget_stop() -> None:
+    """A budget stop returns the comments collected so far plus a resumable session."""
+    identity = parse_douyin_aweme_url("https://www.douyin.com/video/7478048831087725875")
+    raw = {
+        "complete": False,
+        "budget_exhausted": True,
+        "session_id": "session-2",
+        "collected_total": 31,
+        "scrolls": 96,
+        "pages": [
+            {
+                "kind": "root",
+                "payload": {
+                    "total": 240,
+                    "comments": [
+                        {
+                            "cid": "c1",
+                            "text": "根评论",
+                            "create_time": 1_700_000_000,
+                            "user": {"uid": "u1", "nickname": "作者"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    result = shape_douyin_comments(
+        raw,
+        identity,
+        DouyinCommentsRequest.model_validate(
+            {"url": "https://www.douyin.com/video/7478048831087725875"}
+        ),
+    )
+
+    assert result.complete is False
+    assert result.budget_exhausted is True
+    assert result.session_id == "session-2"
+    assert result.collected_total == 31
+    assert result.total == 240
+    assert result.fetched == 1

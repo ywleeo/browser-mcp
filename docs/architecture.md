@@ -88,8 +88,8 @@ Robin 的 bridge 位于：
 | 站点/能力 | 获取机制 | Browser MCP 实现边界 |
 | --- | --- | --- |
 | 通用网页 | Chrome 导航 + rendered DOM / innerText / CDP XHR | `browser_fetch` + `fetch/parsers.rs` |
-| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复；点赞/收藏只定位作品级 `data-e2e` 控件 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` |
-| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR；点赞/收藏只定位详情底栏语义图标 | `sites/xhs.py` + `extension/background.js` |
+| 抖音 | `document_start` MAIN-world observer 只读捕获页面自身签名的 streaming search、aweme detail 和 comment JSON；图文详情支持 React Flight SSR fallback；评论在隔离窗口中定位实际可滚动评论容器并展开回复，按时间预算挂起为可续抓会话；点赞/收藏只定位作品级 `data-e2e` 控件 | `sites/douyin.py` + `extension/douyin_content_*.js` + `extension/background.js` + `extension/comment_sessions.js` |
+| 小红书 | 搜索拦截 signed XHR；笔记读取 SSR initial state；评论在隔离窗口内向 `.note-scroller` 发送原生滚轮事件、到达末尾后反向补扫回复，并捕获 signed XHR，按时间预算挂起为可续抓会话；点赞/收藏只定位详情底栏语义图标 | `sites/xhs.py` + `extension/background.js` + `extension/comment_sessions.js` |
 | Bilibili | 搜索在 Chrome 中读取公开 API；详情页在当前会话中读取 view/tag API 与页面生成的 DASH playinfo；服务端选择兼容轨并按需用 FFmpeg stream copy 合并 | `sites/bilibili.py` + `sites/bilibili_media.py` + `extension/background.js` |
 | X/Twitter | 页面触发 GraphQL，拦截 `SearchTimeline` / `TweetDetail` | `twitter/url.rs` → `shape.rs` → `format.rs` |
 | 淘宝/Tmall | 登录态页面导航后，从 rendered DOM 抽取商品数据 | `taobao` extension action → `format.rs` |
@@ -259,6 +259,7 @@ browser-mcp/
 │   ├── content_bridge.js
 │   ├── douyin_content_inject.js
 │   ├── douyin_content_bridge.js
+│   ├── comment_sessions.js     # 可续抓评论采集会话的生命周期与持久化
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化
@@ -336,6 +337,20 @@ FFmpeg 合并位于独立 `BilibiliMediaDownloader`，不会改变小红书或�
 点赞与收藏也保持平台隔离：对外是四个窄工具，内部共享层只负责 allowlist、请求关联和一次性
 可信点击，不理解任何平台 selector。小红书的 `#like/#liked`、`#collect/#collected` 与抖音的
 `data-e2e-state` 判定全部留在各自扩展 adapter 中。
+
+### 6.1 评论采集的时间预算与续抓
+
+评论采集是没有可靠上界的滚动循环：热门作品要滚几分钟，长于任何 MCP 客户端的单次调用超时。
+因此单次调用不追求抓完，而是**限时**：`time_budget_seconds` 到点时采集挂起而不是失败，返回
+本次新增评论与一个 `session_id`；下一次调用带上它，从上次的滚动位置、去重集合和分页状态继续。
+Python 侧的 bridge 超时只是预算之外的一层硬保护（预算 + 15 秒），触发它意味着扩展卡死，
+而不是采集慢，所以仍然是错误。
+
+会话状态属于扩展：`extension/comment_sessions.js` 只负责窗口/标签、去重集合、循环状态的
+存活、过期与恢复，不理解任何平台的 selector 或分页协议——小红书和抖音的采集循环各自持有
+自己的 `progress` 与 `loop` 对象，模块按引用保存。会话镜像到 `chrome.storage.session`，
+service worker 被回收后仍能恢复续抓，或至少关掉 Chrome 还留着的采集窗口；闲置 5 分钟由
+alarm 清理，配对进程宣告退出时立即全部关闭。
 
 ## 7. MCP 工具面
 

@@ -43,6 +43,7 @@ class FakeBridge:
         self.fetches: list[BrowserReadRequest] = []
         self.site_responses: dict[tuple[str, str], dict[str, Any]] = {}
         self.site_requests: list[tuple[str, str, dict[str, object]]] = []
+        self.site_timeouts: list[float] = []
         self.interactions: list[tuple[str, dict[str, object]]] = []
         self.logged_in_sites = {
             "zhihu": True,
@@ -143,7 +144,7 @@ class FakeBridge:
         timeout_seconds: float = 45.0,
     ) -> dict[str, Any]:
         """Return one configured site-adapter response and record its namespace."""
-        del timeout_seconds
+        self.site_timeouts.append(timeout_seconds)
         self.site_requests.append((message_type, action, args))
         try:
             return self.site_responses[(message_type, action)]

@@ -7,6 +7,11 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, HttpUrl
 
+# Comment collection is a scroll loop with no useful upper bound, so one call is budgeted rather
+# than raced against a timeout: at the deadline the collector returns what it has and keeps a
+# resumable session. The default stays well under the 60s request timeout MCP clients default to.
+DEFAULT_COMMENT_BUDGET_SECONDS = 40.0
+
 
 class ZhihuSearchType(StrEnum):
     """Supported Zhihu search result filters."""
@@ -621,6 +626,8 @@ class XhsCommentsRequest(BaseModel):
 
     url: HttpUrl
     max_comments: int = Field(default=500, ge=1, le=5_000)
+    session_id: str | None = Field(default=None, max_length=64)
+    time_budget_seconds: float = Field(default=DEFAULT_COMMENT_BUDGET_SECONDS, ge=5.0, le=170.0)
 
 
 class XhsComment(BaseModel):
@@ -649,8 +656,11 @@ class XhsCommentsResult(BaseModel):
     url: str
     total: int | None
     fetched: int
+    collected_total: int
     complete: bool
     limit_reached: bool
+    budget_exhausted: bool
+    session_id: str | None
     pages_fetched: int
     scrolls: int
     items: tuple[XhsComment, ...]
@@ -737,6 +747,8 @@ class DouyinCommentsRequest(BaseModel):
 
     url: HttpUrl
     max_comments: int = Field(default=500, ge=1, le=5_000)
+    session_id: str | None = Field(default=None, max_length=64)
+    time_budget_seconds: float = Field(default=DEFAULT_COMMENT_BUDGET_SECONDS, ge=5.0, le=170.0)
 
 
 class DouyinComment(BaseModel):
@@ -765,8 +777,11 @@ class DouyinCommentsResult(BaseModel):
     url: str
     total: int | None
     fetched: int
+    collected_total: int
     complete: bool
     limit_reached: bool
+    budget_exhausted: bool
+    session_id: str | None
     pages_fetched: int
     scrolls: int
     items: tuple[DouyinComment, ...]

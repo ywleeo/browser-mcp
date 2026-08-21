@@ -104,6 +104,17 @@ from browser_mcp.sites.zhihu import (
     parse_zhihu_search,
 )
 
+# Headroom over the collector's own budget, which already covers opening the window, navigating
+# and suspending the session. Hitting this timeout means the extension is stuck, not that
+# collection is slow, so it stays a hard error — and with the default budget it fires at 55s,
+# ahead of the 60s request timeout MCP clients default to, so the caller sees the real reason.
+COLLECTION_TIMEOUT_HEADROOM_SECONDS = 15.0
+
+
+def _collection_timeout(time_budget_seconds: float) -> float:
+    """Bound one budgeted collection call without racing its own deadline."""
+    return time_budget_seconds + COLLECTION_TIMEOUT_HEADROOM_SECONDS
+
 
 class SiteService:
     """Coordinate Chrome transport, pure parsers, and immutable site pagination."""
@@ -343,8 +354,10 @@ class SiteService:
                 "xsecToken": identity.xsec_token,
                 "xsecSource": identity.xsec_source,
                 "maxComments": request.max_comments,
+                "budgetMs": round(request.time_budget_seconds * 1000),
+                "sessionId": request.session_id or "",
             },
-            timeout_seconds=180.0,
+            timeout_seconds=_collection_timeout(request.time_budget_seconds),
         )
         return shape_xhs_comments(raw, identity, request)
 
@@ -462,8 +475,10 @@ class SiteService:
                 "awemeId": identity.aweme_id,
                 "pageKind": identity.page_kind,
                 "maxComments": request.max_comments,
+                "budgetMs": round(request.time_budget_seconds * 1000),
+                "sessionId": request.session_id or "",
             },
-            timeout_seconds=180.0,
+            timeout_seconds=_collection_timeout(request.time_budget_seconds),
         )
         return shape_douyin_comments(raw, identity, request)
 

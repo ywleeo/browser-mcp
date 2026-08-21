@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 改进
+
+- `xhs_comments` 与 `douyin_comments` 改为限时采集：一次调用在 `time_budget_seconds`
+  （默认 40 秒）到点后挂起而不是超时失败，返回本次新抓到的评论、`collected_total` 进度和
+  可续抓的 `session_id`；带上该 `session_id` 再次调用即从上次的滚动位置、去重集合和分页
+  状态继续，不重复已抓过的评论。此前热门作品的评论采集会在 MCP 客户端 60 秒超时时整批丢弃。
+- 新增 `extension/comment_sessions.js`：评论采集会话的窗口、去重集合与循环状态在调用之间
+  存活，镜像到 `chrome.storage.session` 以便 service worker 回收后恢复或清理，闲置 5 分钟
+  由 alarm 关闭，配对进程退出时立即全部释放。
+- 评论采集的 bridge 超时不再是固定 180 秒，而是按本次预算加 15 秒余量，触发它明确表示扩展
+  卡死而非采集慢。
+
 ### 修复
 
 - 通用 `browser_click` 不再调用会产生 `isTrusted=false` 事件的 `element.click()`，改为在
