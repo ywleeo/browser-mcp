@@ -35,6 +35,67 @@ const interactionDebuggers = new Map();
 const lastScreenshotAt = new Map();
 const lastInteractionScreenshots = new Map();
 
+// The MV3 service worker can be evicted (idle timeout, crash, chrome.runtime.reload() on
+// bundle upgrade) at any moment, wiping interactiveTabs/interactionWindows. The window Chrome
+// already opened survives that eviction, but nothing remembers it anymore, so the next
+// interactionTab() call used to create a second window instead of reusing the first — leaking
+// one orphaned window per eviction. chrome.storage.session survives worker restarts (it only
+// clears when the browser itself closes), so mirror both maps there and replay them on wake.
+const INTERACTION_STATE_KEY = "browserMcpInteractionState";
+
+/** Mirror the in-memory tab/window maps to session storage so a worker restart can recover them. */
+async function persistInteractionState() {
+  const state = {};
+  for (const [session, tabId] of interactiveTabs.entries()) {
+    state[session] = { tabId, windowId: interactionWindows.get(session) ?? null };
+  }
+  try {
+    await chrome.storage.session.set({ [INTERACTION_STATE_KEY]: state });
+  } catch (error) {
+    console.warn("[browser-mcp-extension] failed to persist interaction state", error);
+  }
+}
+
+/** Record one session's managed tab/window in memory and in session storage together. */
+async function setInteractionSession(session, tabId, windowId) {
+  interactiveTabs.set(session, tabId);
+  if (windowId != null) interactionWindows.set(session, windowId);
+  else interactionWindows.delete(session);
+  await persistInteractionState();
+}
+
+/** Forget one session's managed tab/window in memory and in session storage together. */
+async function deleteInteractionSession(session) {
+  if (!interactiveTabs.has(session) && !interactionWindows.has(session)) return;
+  interactiveTabs.delete(session);
+  interactionWindows.delete(session);
+  await persistInteractionState();
+}
+
+/** Recover tab/window bindings that survived a service-worker restart, dropping any Chrome already closed. */
+async function hydrateInteractionState() {
+  try {
+    const stored = (await chrome.storage.session.get(INTERACTION_STATE_KEY))[INTERACTION_STATE_KEY];
+    if (!stored) return;
+    for (const [session, entry] of Object.entries(stored)) {
+      const tabId = entry?.tabId;
+      if (tabId == null) continue;
+      try {
+        await chrome.tabs.get(tabId);
+        interactiveTabs.set(session, tabId);
+        if (entry.windowId != null) interactionWindows.set(session, entry.windowId);
+      } catch {
+        // The tab Chrome remembered is already gone; nothing to recover or close.
+      }
+    }
+  } catch (error) {
+    console.warn("[browser-mcp-extension] interaction state hydration failed", error);
+  }
+}
+
+/** Resolved once recovered tab/window bindings are back in memory; awaited before first use. */
+const interactionHydration = hydrateInteractionState();
+
 /** Load server-generated pairing data embedded in the unpacked directory. */
 async function loadPairingConfig() {
   try {
@@ -134,8 +195,7 @@ async function cleanupBridgeSessionsForPort(port) {
   ]);
   for (const session of sessions) {
     const windowId = interactionWindows.get(session);
-    interactiveTabs.delete(session);
-    interactionWindows.delete(session);
+    await deleteInteractionSession(session);
     interactionQueues.delete(session);
     lastInteractionScreenshots.delete(session);
     await closeInteractionDebugger(session);
@@ -912,6 +972,7 @@ async function attachInteractionDebugger(tabId) {
 
 /** Resolve or create the one managed interaction tab for a bridge session. */
 async function interactionTab(state, requestedSession, action, requestedUrl) {
+  await interactionHydration;
   const session = `${state.port}:${String(requestedSession || "default")}`;
   const existingTabId = interactiveTabs.get(session);
   if (existingTabId != null) {
@@ -925,14 +986,13 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
         && !needsIsolatedTab
       ) return existing;
       if (needsIsolatedTab) {
-        interactiveTabs.delete(session);
+        await deleteInteractionSession(session);
         lastInteractionScreenshots.delete(session);
         await closeInteractionDebugger(session);
       } else if (!(action === "snapshot" && typeof requestedUrl === "string")) {
         throw new Error("managed tab is no longer on a public webpage; provide url to browser_snapshot");
       } else {
-        interactiveTabs.delete(session);
-        interactionWindows.delete(session);
+        await deleteInteractionSession(session);
         lastInteractionScreenshots.delete(session);
         await closeInteractionDebugger(session);
         if (isolatedWindowId === existing.windowId) {
@@ -940,8 +1000,7 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
         }
       }
     } catch {
-      interactiveTabs.delete(session);
-      interactionWindows.delete(session);
+      await deleteInteractionSession(session);
       lastInteractionScreenshots.delete(session);
     }
   }
@@ -958,16 +1017,14 @@ async function interactionTab(state, requestedSession, action, requestedUrl) {
     if (created?.id == null || createdWindow.id == null) {
       throw new Error("Chrome did not create an isolated interaction window");
     }
-    interactiveTabs.set(session, created.id);
-    interactionWindows.set(session, createdWindow.id);
+    await setInteractionSession(session, created.id, createdWindow.id);
     return created;
   }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (active?.id == null || !/^https?:\/\//i.test(String(active.url || ""))) {
     throw new Error("no public webpage is active; provide url to browser_snapshot")
   }
-  interactiveTabs.set(session, active.id);
-  interactionWindows.delete(session);
+  await setInteractionSession(session, active.id, null);
   return active;
 }
 
@@ -3291,8 +3348,7 @@ chrome.debugger.onDetach.addListener((source) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   for (const [session, managedTabId] of interactiveTabs.entries()) {
     if (managedTabId !== tabId) continue;
-    interactiveTabs.delete(session);
-    interactionWindows.delete(session);
+    void deleteInteractionSession(session);
     lastInteractionScreenshots.delete(session);
     void closeInteractionDebugger(session);
   }
