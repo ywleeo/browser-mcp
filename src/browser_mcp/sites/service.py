@@ -28,7 +28,7 @@ from browser_mcp.sites.douyin import (
     shape_douyin_search,
     shape_douyin_video,
 )
-from browser_mcp.sites.media import MediaDownloader, MediaSource
+from browser_mcp.sites.media import MediaDownloader, MediaSource, ProgressCallback
 from browser_mcp.sites.models import (
     BilibiliDownloadRequest,
     BilibiliDownloadResult,
@@ -212,18 +212,24 @@ class SiteService:
     async def bilibili_download_video(
         self,
         request: BilibiliDownloadRequest,
+        progress_callback: ProgressCallback | None = None,
     ) -> BilibiliDownloadResult:
         """Download and losslessly mux one Bilibili page's best compatible tracks."""
         streams = await self._bilibili_media_streams(request)
-        return await self._bilibili_media_downloader.download_video(streams, request)
+        return await self._bilibili_media_downloader.download_video(
+            streams, request, progress_callback=progress_callback
+        )
 
     async def bilibili_download_audio(
         self,
         request: BilibiliDownloadRequest,
+        progress_callback: ProgressCallback | None = None,
     ) -> BilibiliDownloadResult:
         """Download only one Bilibili page's best compatible audio track."""
         streams = await self._bilibili_media_streams(request)
-        return await self._bilibili_media_downloader.download_audio(streams, request)
+        return await self._bilibili_media_downloader.download_audio(
+            streams, request, progress_callback=progress_callback
+        )
 
     async def _bilibili_media_streams(
         self,

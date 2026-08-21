@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from browser_mcp.sites import media as media_module
 from browser_mcp.sites.media import MediaDownloader, MediaDownloadError, MediaSource
 from tests.helpers import allow_public_url_policy
 
@@ -143,3 +144,60 @@ async def test_media_downloader_supports_bilibili_audio_cdn_contract(tmp_path: P
     assert Path(result.items[0].path).suffix == ".m4a"
     assert observed_headers["origin"] == "https://www.bilibili.com"
     assert observed_headers["referer"].endswith("BV1eaMH6gEDx/")
+
+
+@pytest.mark.asyncio
+async def test_media_downloader_reports_progress_and_ignores_reporter_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress callbacks run during streaming; a failing reporter never fails the download."""
+    content = b"x" * 4096
+    calls: list[tuple[int, int | None]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg", "content-length": str(len(content))},
+            content=content,
+            request=request,
+        )
+
+    async def record(done: int, total: int | None) -> None:
+        calls.append((done, total))
+
+    # Report on every chunk instead of waiting for the throttle interval.
+    monkeypatch.setattr(media_module, "PROGRESS_REPORT_INTERVAL_SECONDS", 0.0)
+
+    downloader = MediaDownloader(
+        tmp_path,
+        url_policy=allow_public_url_policy(),
+        transport=httpx.MockTransport(handle),
+    )
+    result = await downloader.download(
+        platform="xhs",
+        post_id="progress1",
+        page_url="https://www.xiaohongshu.com/explore/progress1",
+        sources=(MediaSource(kind="image", url="https://sns-img.xhscdn.com/pic"),),
+        output_dir=None,
+        overwrite=False,
+        progress_callback=record,
+    )
+
+    assert result.total_bytes == len(content)
+    assert calls, "progress callback must fire while streaming"
+    assert calls[-1] == (len(content), len(content))
+
+    # A raising reporter must not abort the download.
+    async def explode(_done: int, _total: int | None) -> None:
+        raise RuntimeError("reporter failed")
+
+    result = await downloader.download(
+        platform="xhs",
+        post_id="progress2",
+        page_url="https://www.xiaohongshu.com/explore/progress2",
+        sources=(MediaSource(kind="image", url="https://sns-img.xhscdn.com/pic"),),
+        output_dir=None,
+        overwrite=False,
+        progress_callback=explode,
+    )
+    assert result.downloaded == 1

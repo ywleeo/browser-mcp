@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.context import Context
 from mcp_types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from browser_mcp import __version__
@@ -31,7 +32,7 @@ from browser_mcp.models import (
     SnapshotPageRequest,
 )
 from browser_mcp.sites import SiteService
-from browser_mcp.sites.media import MediaDownloader
+from browser_mcp.sites.media import MediaDownloader, ProgressCallback
 from browser_mcp.sites.models import (
     BilibiliDownloadRequest,
     BilibiliDownloadResult,
@@ -119,6 +120,28 @@ def create_server(
             yield None
         finally:
             await browser_service.close()
+
+    def _progress(ctx: Context) -> ProgressCallback:
+        """Build a download-progress reporter bound to one MCP request context.
+
+        `report_progress` is a no-op for callers that did not negotiate a progress
+        token, so plain tool calls are unaffected. The reporter is best-effort:
+        the downloader never propagates a reporting failure.
+        """
+
+        async def report(bytes_done: int, bytes_total: int | None) -> None:
+            if bytes_total is not None:
+                await ctx.report_progress(
+                    float(bytes_done),
+                    float(bytes_total),
+                    f"downloaded {bytes_done:,} of {bytes_total:,} bytes",
+                )
+            else:
+                await ctx.report_progress(
+                    float(bytes_done), None, f"downloaded {bytes_done:,} bytes"
+                )
+
+        return report
 
     server: MCPServer[None] = MCPServer(
         name="browser-mcp",
@@ -300,6 +323,7 @@ def create_server(
         return await websites.bilibili_video(request)
 
     async def _bilibili_download_video(
+        ctx: Context,
         url: str,
         output_dir: str | None = None,
         overwrite: bool = False,
@@ -314,9 +338,10 @@ def create_server(
                 "max_file_mb": max_file_mb,
             }
         )
-        return await websites.bilibili_download_video(request)
+        return await websites.bilibili_download_video(request, _progress(ctx))
 
     async def _bilibili_download_audio(
+        ctx: Context,
         url: str,
         output_dir: str | None = None,
         overwrite: bool = False,
@@ -331,7 +356,7 @@ def create_server(
                 "max_file_mb": max_file_mb,
             }
         )
-        return await websites.bilibili_download_audio(request)
+        return await websites.bilibili_download_audio(request, _progress(ctx))
 
     async def _xhs_search(
         keyword: str,

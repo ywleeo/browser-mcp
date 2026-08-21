@@ -11,7 +11,12 @@ from tempfile import TemporaryDirectory
 from typing import Final
 
 from browser_mcp.sites.bilibili import BilibiliMediaStreams
-from browser_mcp.sites.media import MediaDownloader, MediaDownloadError, MediaSource
+from browser_mcp.sites.media import (
+    MediaDownloader,
+    MediaDownloadError,
+    MediaSource,
+    ProgressCallback,
+)
 from browser_mcp.sites.models import (
     BilibiliDownloadRequest,
     BilibiliDownloadResult,
@@ -34,6 +39,7 @@ class BilibiliMediaDownloader:
         self,
         streams: BilibiliMediaStreams,
         request: BilibiliDownloadRequest,
+        progress_callback: ProgressCallback | None = None,
     ) -> BilibiliDownloadResult:
         """Download the selected video and mux its companion audio without transcoding."""
         page_url = _page_url(streams)
@@ -48,6 +54,7 @@ class BilibiliMediaDownloader:
                 output_dir=request.output_dir,
                 overwrite=request.overwrite,
                 max_file_bytes=max_file_bytes,
+                progress_callback=progress_callback,
             )
             return _result(streams, "video", False, downloaded)
 
@@ -64,6 +71,7 @@ class BilibiliMediaDownloader:
                 output_dir=request.output_dir,
                 overwrite=request.overwrite,
                 max_file_bytes=max_file_bytes,
+                progress_callback=progress_callback,
             )
             return _result(streams, "video", False, downloaded)
 
@@ -86,6 +94,7 @@ class BilibiliMediaDownloader:
                     output_dir=staging,
                     overwrite=True,
                     max_file_bytes=max_file_bytes,
+                    progress_callback=progress_callback,
                 )
                 await _mux_tracks(
                     ffmpeg,
@@ -132,6 +141,7 @@ class BilibiliMediaDownloader:
         self,
         streams: BilibiliMediaStreams,
         request: BilibiliDownloadRequest,
+        progress_callback: ProgressCallback | None = None,
     ) -> BilibiliDownloadResult:
         """Download only the highest-bandwidth compatible audio track."""
         if streams.audio is None:
@@ -144,6 +154,7 @@ class BilibiliMediaDownloader:
             output_dir=request.output_dir,
             overwrite=request.overwrite,
             max_file_bytes=request.max_file_mb * 1_048_576,
+            progress_callback=progress_callback,
         )
         return _result(streams, "audio", False, downloaded)
 

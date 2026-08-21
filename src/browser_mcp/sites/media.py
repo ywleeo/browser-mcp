@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -43,6 +44,15 @@ CONTENT_EXTENSIONS: Final = {
 }
 type MediaPlatform = Literal["xhs", "douyin", "bilibili"]
 type MediaKind = Literal["image", "video", "audio"]
+
+#: Report at most one progress callback per interval while a stream is flowing.
+#: The callback is invoked asynchronously, so a slow consumer (e.g. an MCP
+#: progress notification) cannot stall the download; failures are swallowed and
+#: logged by the downloader.
+PROGRESS_REPORT_INTERVAL_SECONDS: Final = 2.0
+
+#: Optional progress reporter: (bytes_done, bytes_total_or_None) → awaitable.
+ProgressCallback = Callable[[int, int | None], Awaitable[None]]
 
 
 class MediaDownloadError(RuntimeError):
@@ -84,8 +94,15 @@ class MediaDownloader:
         output_dir: str | None,
         overwrite: bool,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        progress_callback: ProgressCallback | None = None,
     ) -> MediaDownloadResult:
-        """Download every selected source and return exact file metadata."""
+        """Download every selected source and return exact file metadata.
+
+        `progress_callback`, when given, is awaited at most once per
+        :data:`PROGRESS_REPORT_INTERVAL_SECONDS` while each source streams with
+        ``(bytes_done, bytes_total_or_None)``. It is best-effort: exceptions are
+        logged and never fail the download.
+        """
         directory = self._directory(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         items: list[MediaDownloadItem] = []
@@ -112,6 +129,7 @@ class MediaDownloader:
                     directory=directory,
                     overwrite=overwrite,
                     max_file_bytes=max_file_bytes,
+                    progress_callback=progress_callback,
                 )
                 items.append(item)
         return MediaDownloadResult(
@@ -134,6 +152,7 @@ class MediaDownloader:
         directory: Path,
         overwrite: bool,
         max_file_bytes: int,
+        progress_callback: ProgressCallback | None = None,
     ) -> MediaDownloadItem:
         """Follow validated redirects and atomically publish one bounded file."""
         response, final_url = await self._open_response(client, platform, source.url)
@@ -153,6 +172,7 @@ class MediaDownloader:
             size = 0
             try:
                 with temporary.open("wb") as output:
+                    progress = _ProgressReporter(progress_callback, declared_size)
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > max_file_bytes:
@@ -161,6 +181,7 @@ class MediaDownloader:
                             )
                         digest.update(chunk)
                         output.write(chunk)
+                        await progress.maybe_report(size)
                 temporary.replace(target)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -286,3 +307,33 @@ def _target_path(directory: Path, stem: str, extension: str, overwrite: bool) ->
         if not candidate.exists():
             return candidate
     raise MediaDownloadError(f"could not allocate a unique filename for {initial.name}")
+
+
+class _ProgressReporter:
+    """Throttle progress callbacks to at most one per interval while streaming."""
+
+    def __init__(self, callback: ProgressCallback | None, total: int | None) -> None:
+        self._callback = callback
+        self._total = total
+        self._next_report_at = 0.0
+
+    async def maybe_report(self, bytes_done: int) -> None:
+        """Await the callback when the throttle interval has elapsed."""
+        if self._callback is None:
+            return
+        now = _monotonic()
+        if now < self._next_report_at:
+            return
+        self._next_report_at = now + PROGRESS_REPORT_INTERVAL_SECONDS
+        try:
+            await self._callback(bytes_done, self._total)
+        except Exception:
+            # Progress is best-effort; never let a failing reporter fail a download.
+            pass
+
+
+def _monotonic() -> float:
+    """Monotonic clock without importing time at module scope."""
+    import time
+
+    return time.monotonic()
