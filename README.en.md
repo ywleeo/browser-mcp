@@ -26,9 +26,20 @@ your **real Chrome**:
 | Easily blocked by anti-bot, leaks cookies | **No reverse-engineering, extension never requests `cookies`, downloads verified by SHA-256, side-effect actions need confirmation** |
 | Only works with a couple of agents | **Standard MCP: Codex / Claude Desktop / Cursor / Claude Code… all work** |
 
-**Fully compliant**: it doesn't reverse-engineer internal APIs, bypass CAPTCHAs, steal cookies, or
-bulk-scrape — it behaves exactly like a normal logged-in user browsing. Your login state is only used
-normally inside your own Chrome; it's never sent back or returned through MCP results.
+**Runs locally; your data stays on your machine**: the MCP server and the Chrome extension run on your own
+machine, over localhost (`127.0.0.1`) only — there's no extra remote server, and your session is never
+uploaded.
+
+- **Login state never leaks**: the extension never requests the `cookies` permission and never returns or
+  persists cookies — your login state is only used normally by the page inside your own Chrome.
+- **Records & artifacts stay local**: connection, tool-call, and media-download state are kept locally;
+  downloads land on disk with a SHA-256 and aren't reported anywhere else.
+- **Fully compliant**: it doesn't reverse-engineer internal APIs, bypass CAPTCHAs, steal cookies, or
+  bulk-scrape — it behaves exactly like a normal logged-in user browsing.
+- **The one boundary**: the page **content** you ask the AI to read is returned to your assistant as a tool
+  result (that's its whole purpose). If your assistant is wired to a model API, that content goes to the
+  model service. But **login state and cookies never** go with it — this boundary is separate from "you
+  hand content to the AI."
 
 ## What you can do
 
