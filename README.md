@@ -50,7 +50,7 @@ Browser MCP 是一个本地 MCP server。它让**任何支持 MCP 的 AI 助手*
 - **Reddit**：帖子搜索、帖子详情、评论。
 - **搜索**：Google、必应、搜狗网页搜索。
 
-当前版本为 `0.12.0`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本为 `0.12.1`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 点赞、收藏、发布、发送、购买、删除等会产生外部影响的最终操作，应在执行前向用户确认。
 扩展会使用当前 Chrome Profile 的登录状态访问页面，但**不会**向 MCP 返回或持久化 Cookie。
@@ -103,7 +103,7 @@ uv sync
   "state": "connected",
   "connected": true,
   "bridge_port": 17880,
-  "server_version": "0.12.0",
+  "server_version": "0.12.1",
   "install_mode": "source",
   "project_root": "/path/to/browser-mcp",
   "source_commit": "<git-commit>",

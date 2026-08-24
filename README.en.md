@@ -58,7 +58,7 @@ state to get the platform's own data.
 - **Reddit**: post search, post details, comments.
 - **Search**: Google, Bing, Sogou.
 
-Current version is `0.12.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current version is `0.12.1`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 Final actions that affect external state — like, collect, publish, send, buy, delete — should be
 confirmed with the user before executing. The extension uses the current Chrome Profile's login
@@ -113,7 +113,7 @@ A successful connection returns:
   "state": "connected",
   "connected": true,
   "bridge_port": 17880,
-  "server_version": "0.12.0",
+  "server_version": "0.12.1",
   "install_mode": "source",
   "project_root": "/path/to/browser-mcp",
   "source_commit": "<git-commit>",

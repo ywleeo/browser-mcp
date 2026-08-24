@@ -2,6 +2,14 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.12.1] - 2026-08-24
+
+### 文档
+
+- README 安装改为以 `pip install ai-browser-mcp`（或 `uvx ai-browser-mcp`）为首选，源码安装作为备选。
+- 新增「本地运行，数据不出本机」隐私段：MCP server 与扩展只走 localhost、登录态与 Cookie 从不经
+  MCP 传出、记录与产物留本地；并明确边界说明（读取的页面内容会返回给 AI 助手）。
+
 ## [0.12.0] - 2026-08-24
 
 ### 发布与文档
