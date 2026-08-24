@@ -2,7 +2,14 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
-## [Unreleased]
+## [0.12.0] - 2026-08-24
+
+### 发布与文档
+
+- 包名改为 `ai-browser-mcp`（PyPI 原名 `browser-mcp` 已被占用），并新增基于 PyPI trusted
+  publishing 的 `.github/workflows/publish.yml`，打 `v*` tag 时自动构建并发布。
+- README 重写为 pitch 前置：开头突出「让你的 AI 真正搜遍全网、登录能访问的站点都能抓、还能后台
+  自动化操作」，并新增英文版 `README.en.md`；PyPI 页面以此为 `readme`。
 
 ### 改进
 
