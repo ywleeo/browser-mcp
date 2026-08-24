@@ -672,6 +672,7 @@ async def _run(site: str) -> None:
                     {
                         "x": float(coordinate_target["x"]) + float(coordinate_target["width"]) / 2,
                         "y": float(coordinate_target["y"]) + float(coordinate_target["height"]) / 2,
+                        "coordinate_space": "viewport",
                     },
                 )
                 data = _print_visual_result("browser_click[coordinate]", result)

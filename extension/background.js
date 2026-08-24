@@ -46,7 +46,6 @@ const interactiveTabs = new Map();
 const interactionWindows = new Map();
 const interactionQueues = new Map();
 const interactionDebuggers = new Map();
-const lastScreenshotAt = new Map();
 const lastInteractionScreenshots = new Map();
 
 // The MV3 service worker can be evicted (idle timeout, crash, chrome.runtime.reload() on
@@ -768,6 +767,7 @@ async function dispatchBrowserInteraction(state, message) {
   }
 
   let debuggerSession = null;
+  let restoreFocusedWindowId = null;
   let stage = "resolve tab";
   try {
     const tab = await interactionTab(state, message.tab_id, action, args.url);
@@ -784,27 +784,34 @@ async function dispatchBrowserInteraction(state, message) {
       }
     }
 
-    const screenshotMetrics = lastInteractionScreenshots.get(session) || null;
-    const clickPoint = action === "click" && !args.element_id
-      ? interactionClickPoint(args, screenshotMetrics)
+    // Coordinate clicks are deliberately frame-agnostic: the screenshot point is the
+    // authority, so clicking must not inspect or mutate iframe DOM. Other semantic actions
+    // still remove only inaccessible extension-owned frames before their targeted scripts.
+    if (action !== "click") await removeForeignExtensionFrames(tabId);
+
+    const screenshotState = lastInteractionScreenshots.get(session) || null;
+    const clickPoint = action === "click"
+      ? interactionClickPoint(args, screenshotState)
       : null;
-    const navigationTarget = await interactionNavigationTarget(tabId, action, args, clickPoint);
+    const navigationTarget = action === "click"
+      ? null
+      : await interactionNavigationTarget(tabId, action, args, clickPoint);
     if (navigationTarget) {
       const approval = await requestUrlApproval(state, navigationTarget);
       if (!approval.allowed) {
         throw new Error(`action target blocked: ${approval.error || "URL policy"}`);
       }
     }
-    const currentTab = await chrome.tabs.get(tabId);
-    const needsDebugger = action === "click" || (
-      action === "snapshot"
-      && args.url != null
-      && String(currentTab.url || "") !== String(args.url)
-    ) || (action !== "snapshot" && navigationTarget != null);
-    if (needsDebugger) {
-      stage = "attach debugger";
-      debuggerSession = await interactionDebuggerSession(state, session, tabId);
-      debuggerSession.policyFailure = null;
+    // Keep one debugger session across the action and state capture. Besides guarding
+    // navigations, CDP is required for trusted keyboard input and for resolving element
+    // boxes inside cross-origin frames without violating the same-origin boundary.
+    stage = "attach debugger";
+    debuggerSession = await interactionDebuggerSession(state, session, tabId);
+    debuggerSession.policyFailure = null;
+
+    if (action === "click") {
+      stage = "focus managed interaction window";
+      restoreFocusedWindowId = await focusManagedInteractionWindow(session, tab);
     }
 
     stage = "execute action";
@@ -830,27 +837,104 @@ async function dispatchBrowserInteraction(state, message) {
       throw new Error(`resulting page blocked: ${finalApproval.error || "URL policy"}`);
     }
     stage = "capture resulting state";
+    let screenshot;
+    try {
+      screenshot = await captureInteractionScreenshot(debuggerSession?.target || null);
+    } catch (error) {
+      throw new Error(`screenshot capture: ${error?.message || error}`);
+    }
+    let visual;
+    try {
+      visual = action === "click"
+        ? await captureVisualClickState(
+          tabId,
+          screenshot,
+          debuggerSession?.target || null,
+        )
+        : await captureInteractionState(
+          tabId,
+          action,
+          screenshot,
+          debuggerSession?.target || null,
+        );
+    } catch (error) {
+      throw new Error(`page-state capture: ${error?.message || error}`);
+    }
     if (debuggerSession) {
       await closeInteractionDebugger(session);
       debuggerSession = null;
     }
-    const screenshot = await captureInteractionScreenshot(tabId, session);
-    const visual = await captureInteractionState(tabId, action, screenshot);
+    await restoreInteractionWindowFocus(restoreFocusedWindowId);
+    restoreFocusedWindowId = null;
     lastInteractionScreenshots.set(session, {
       width: screenshot.width,
       height: screenshot.height,
       viewportWidth: visual.state.viewport.width,
       viewportHeight: visual.state.viewport.height,
+      elements: visual.state.elements,
+      targets: visual.clickTargets,
     });
-    reply({ ok: true, data: visual });
+    reply({
+      ok: true,
+      data: { state: visual.state, screenshot_data: visual.screenshot_data },
+    });
   } catch (error) {
     if (debuggerSession) await closeInteractionDebugger(session);
+    await restoreInteractionWindowFocus(restoreFocusedWindowId);
     reply({ ok: false, error: `${action} failed during ${stage}: ${error?.message || error}` });
   }
 }
 
-/** Convert one screenshot or viewport coordinate into a current CSS viewport point. */
-function interactionClickPoint(args, screenshotMetrics) {
+/** Focus only an extension-owned interaction window and remember the user's prior window. */
+async function focusManagedInteractionWindow(session, tab) {
+  const managedWindowId = interactionWindows.get(session);
+  if (managedWindowId == null || managedWindowId !== tab.windowId) return null;
+  const previous = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  if (previous?.id === managedWindowId) return null;
+  await chrome.windows.update(managedWindowId, { focused: true });
+  // Let Chrome finish activating the page surface before trusted input is dispatched.
+  // The screenshot itself is captured through CDP, so this focus transition cannot
+  // introduce browser-window chrome into the visual coordinate system.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  return previous?.id ?? null;
+}
+
+/** Restore the browser window that was focused before one trusted managed click. */
+async function restoreInteractionWindowFocus(windowId) {
+  if (windowId == null) return;
+  await chrome.windows.update(windowId, { focused: true }).catch(() => {});
+}
+
+/** Resolve an element reference or screenshot coordinate to one CSS viewport point. */
+function interactionClickPoint(args, screenshotState) {
+  if (typeof args.element_id === "string") {
+    if (!screenshotState || !Array.isArray(screenshotState.elements)) {
+      throw new Error("element clicks require a fresh browser_snapshot");
+    }
+    const element = screenshotState.elements.find(
+      (candidate) => candidate.element_id === args.element_id,
+    );
+    if (!element) {
+      throw new Error(`element reference is stale: ${args.element_id}; take a new snapshot`);
+    }
+    if (element.disabled) throw new Error(`element is disabled: ${args.element_id}`);
+    const x = Number(element.x) + Number(element.width) / 2;
+    const y = Number(element.y) + Number(element.height) / 2;
+    if (
+      !Number.isFinite(x)
+      || !Number.isFinite(y)
+      || x < 0
+      || y < 0
+      || x >= screenshotState.viewportWidth
+      || y >= screenshotState.viewportHeight
+    ) {
+      throw new Error(`element is outside the current screenshot: ${args.element_id}`);
+    }
+    return {
+      x,
+      y,
+    };
+  }
   const x = Number(args.x);
   const y = Number(args.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
@@ -862,22 +946,28 @@ function interactionClickPoint(args, screenshotMetrics) {
     throw new Error(`unsupported click coordinate space: ${coordinateSpace}`);
   }
   if (
-    !screenshotMetrics
-    || screenshotMetrics.width <= 0
-    || screenshotMetrics.height <= 0
-    || screenshotMetrics.viewportWidth <= 0
-    || screenshotMetrics.viewportHeight <= 0
+    !screenshotState
+    || screenshotState.width <= 0
+    || screenshotState.height <= 0
+    || screenshotState.viewportWidth <= 0
+    || screenshotState.viewportHeight <= 0
   ) {
     throw new Error("screenshot coordinates require a fresh browser_snapshot");
   }
-  if (x < 0 || y < 0 || x >= screenshotMetrics.width || y >= screenshotMetrics.height) {
+  if (x < 0 || y < 0 || x >= screenshotState.width || y >= screenshotState.height) {
     throw new Error(
-      `click coordinate is outside screenshot ${screenshotMetrics.width}x${screenshotMetrics.height}`,
+      `click coordinate is outside screenshot ${screenshotState.width}x${screenshotState.height}`,
     );
   }
+  const scaleX = screenshotState.width / screenshotState.viewportWidth;
+  const scaleY = screenshotState.height / screenshotState.viewportHeight;
+  const scaleDifference = Math.abs(scaleX - scaleY) / Math.max(scaleX, scaleY);
+  if (!Number.isFinite(scaleDifference) || scaleDifference > 0.01) {
+    throw new Error("screenshot and viewport coordinate systems are not aligned; take a new snapshot");
+  }
   return {
-    x: x * screenshotMetrics.viewportWidth / screenshotMetrics.width,
-    y: y * screenshotMetrics.viewportHeight / screenshotMetrics.height,
+    x: x / scaleX,
+    y: y / scaleY,
   };
 }
 
@@ -1064,7 +1154,7 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
     return;
   }
   if (action === "click") {
-    await executeDomClick(tabId, args, debuggerTarget, clickPoint);
+    await executeTrustedClick(debuggerTarget, clickPoint);
     return;
   }
   if (action === "scroll") {
@@ -1078,6 +1168,7 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
         String(args.element_id || ""),
         typeof args.text === "string" ? args.text : "",
         args.clear !== false,
+        debuggerTarget,
       );
     } catch (error) {
       throw new Error(`enter text: ${error?.message || error}`);
@@ -1100,102 +1191,191 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
   }
 }
 
-/** Resolve a live DOM hit point, then send exactly one trusted Chrome mouse click. */
-async function executeDomClick(tabId, args, debuggerTarget, clickPoint) {
-  if (!debuggerTarget) throw new Error("trusted click requires an attached Chrome debugger");
-  const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId },
+/** Return whether one frame is a webpage rather than a browser or password-manager extension. */
+function interactionFrameIsInjectable(frame) {
+  const locations = [frame?.url, frame?.securityOrigin, frame?.unreachableUrl]
+    .map((value) => String(value || ""));
+  return !locations.some((location) => (
+    /^(chrome-extension|moz-extension|safari-web-extension|chrome|devtools|edge|extension):/i
+      .test(location)
+  ));
+}
+
+/** Return whether Chrome rejected traversal because another extension owns one child frame. */
+function isForeignExtensionFrameError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return message.includes("chrome-extension://") && message.includes("different extension");
+}
+
+/** Remove foreign-extension iframe containers while preserving every ordinary webpage frame. */
+async function removeForeignExtensionFrames(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!/^https?:\/\//i.test(String(tab.url || ""))) return;
+  await executeInteractionFrames(tabId, {
     world: "MAIN",
-    args: [args.element_id || null, clickPoint?.x ?? null, clickPoint?.y ?? null],
-    func: async (elementId, x, y) => {
-      const interactiveSelector = [
-        "button", "input", "textarea", "select", "a[href]", "label", "summary",
-        "[contenteditable='true']", "[role='button']", "[role='link']", "[role='checkbox']",
-        "[role='radio']", "[role='tab']", "[role='menuitem']", "[role='option']",
-        "[role='switch']", "[onclick]",
-      ].join(",");
-      const describe = (candidate) => {
-        if (!(candidate instanceof Element)) return "nothing";
-        const id = candidate.id ? `#${candidate.id}` : "";
-        const role = candidate.getAttribute("role");
-        return `${candidate.tagName.toLowerCase()}${id}${role ? `[role=${role}]` : ""}`;
-      };
-      const supportsPoint = (target, point) => {
-        const hit = document.elementFromPoint(point.x, point.y);
-        return hit instanceof Element && (hit === target || target.contains(hit));
-      };
-      const visibleRects = (target) => [...target.getClientRects()]
-        .map((rect) => ({
-          left: Math.max(0, rect.left),
-          top: Math.max(0, rect.top),
-          right: Math.min(innerWidth, rect.right),
-          bottom: Math.min(innerHeight, rect.bottom),
-        }))
-        .filter((rect) => rect.right - rect.left > 2 && rect.bottom - rect.top > 2);
-      const candidatePoints = (rect) => {
-        const insetX = Math.min(8, (rect.right - rect.left) / 4);
-        const insetY = Math.min(8, (rect.bottom - rect.top) / 4);
-        const centerX = (rect.left + rect.right) / 2;
-        const centerY = (rect.top + rect.bottom) / 2;
-        return [
-          { x: centerX, y: centerY },
-          { x: rect.left + insetX, y: rect.top + insetY },
-          { x: rect.right - insetX, y: rect.top + insetY },
-          { x: rect.left + insetX, y: rect.bottom - insetY },
-          { x: rect.right - insetX, y: rect.bottom - insetY },
-        ];
-      };
-      let element = null;
-      if (elementId) {
-        const escaped = CSS.escape(elementId);
-        element = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
-        if (!element) return { error: `element reference is stale: ${elementId}; take a new snapshot` };
-        element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-        await Promise.race([
-          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-          new Promise((resolve) => setTimeout(resolve, 100)),
-        ]);
-        if (!element.isConnected) {
-          return { error: `element reference became stale while scrolling: ${elementId}` };
+    func: () => {
+      const roots = [document];
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot) roots.push(element.shadowRoot);
         }
-      } else if (Number.isFinite(x) && Number.isFinite(y)) {
-        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {
-          return { error: `click coordinate is outside viewport ${innerWidth}x${innerHeight}` };
+      }
+      let removed = 0;
+      for (const root of roots) {
+        for (const frame of root.querySelectorAll("iframe[src],frame[src]")) {
+          const source = String(frame.getAttribute("src") || frame.src || "");
+          if (!/^(chrome-extension|moz-extension|safari-web-extension):/i.test(source)) continue;
+          frame.remove();
+          removed += 1;
         }
-        const hit = document.elementFromPoint(x, y);
-        element = hit?.closest(interactiveSelector) || hit;
-        if (!element) return { error: `no element found at viewport coordinate ${x},${y}` };
-      } else {
-        return { error: "browser_click requires element_id or non-negative x and y" };
       }
-      if (("disabled" in element && element.disabled) || element.getAttribute("aria-disabled") === "true") {
-        return { error: `element is disabled: ${elementId || `${x},${y}`}` };
-      }
-      if (!elementId) {
-        return {
-          point: { x, y },
-          target: describe(element),
-        };
-      }
-      for (const rect of visibleRects(element)) {
-        const point = candidatePoints(rect).find((candidate) => supportsPoint(element, candidate));
-        if (point) return { point, target: describe(element) };
-      }
-      const rect = element.getBoundingClientRect();
-      const attempted = {
-        x: Math.max(0, Math.min(innerWidth - 1, (rect.left + rect.right) / 2)),
-        y: Math.max(0, Math.min(innerHeight - 1, (rect.top + rect.bottom) / 2)),
-      };
-      return {
-        error: `element is not hit-testable; obscured by ${describe(document.elementFromPoint(
-          attempted.x,
-          attempted.y,
-        ))}`,
-      };
+      return { removed };
     },
+  }, true);
+}
+
+/** Execute one page function in each accessible frame without one foreign extension aborting all. */
+async function executeInteractionFrames(tabId, injection, allFrames) {
+  if (!allFrames) {
+    return chrome.scripting.executeScript({
+      ...injection,
+      target: { tabId },
+    });
+  }
+  const frames = await chrome.webNavigation.getAllFrames({ tabId });
+  const orderedFrames = [...(frames || [])].sort(
+    (left, right) => Number(left.frameId !== 0) - Number(right.frameId !== 0),
+  );
+  const executions = [];
+  for (const frame of orderedFrames) {
+    if (!interactionFrameIsInjectable(frame)) continue;
+    try {
+      const frameExecutions = await chrome.scripting.executeScript({
+        ...injection,
+        target: { tabId, frameIds: [frame.frameId] },
+      });
+      executions.push(...frameExecutions);
+    } catch (error) {
+      if (frame.frameId === 0) throw error;
+    }
+  }
+  return executions;
+}
+
+/** Flatten one CDP frame tree in top-frame-first order. */
+function flattenInteractionFrameTree(frameTree) {
+  const frames = [];
+  const queue = frameTree ? [frameTree] : [];
+  while (queue.length) {
+    const current = queue.shift();
+    if (current?.frame) frames.push(current.frame);
+    if (Array.isArray(current?.childFrames)) queue.push(...current.childFrames);
+  }
+  return frames;
+}
+
+/** Resolve snapshot references in isolated contexts without piercing foreign extension frames. */
+async function readInteractionBackendNodes(debuggerTarget) {
+  const references = new Map();
+  if (!debuggerTarget) return { references };
+  const { frameTree } = await chrome.debugger.sendCommand(debuggerTarget, "Page.getFrameTree", {});
+  const expression = `(() => {
+    const roots = [document];
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll("*")) {
+        if (element.shadowRoot) roots.push(element.shadowRoot);
+      }
+    }
+    return roots.flatMap((root) => [
+      ...root.querySelectorAll("[data-browser-mcp-ref]"),
+    ]);
+  })()`;
+  for (const frame of flattenInteractionFrameTree(frameTree)) {
+    if (!interactionFrameIsInjectable(frame)) continue;
+    try {
+      const world = await chrome.debugger.sendCommand(debuggerTarget, "Page.createIsolatedWorld", {
+        frameId: frame.id,
+        worldName: "browser-mcp-interaction",
+      });
+      const evaluation = await chrome.debugger.sendCommand(debuggerTarget, "Runtime.evaluate", {
+        expression,
+        contextId: world.executionContextId,
+        returnByValue: false,
+      });
+      const arrayObjectId = evaluation?.result?.objectId;
+      if (!arrayObjectId) continue;
+      const properties = await chrome.debugger.sendCommand(debuggerTarget, "Runtime.getProperties", {
+        objectId: arrayObjectId,
+        ownProperties: true,
+      });
+      for (const property of properties?.result || []) {
+        const objectId = property?.value?.objectId;
+        if (!objectId || !/^\d+$/.test(String(property.name || ""))) continue;
+        const description = await chrome.debugger.sendCommand(debuggerTarget, "DOM.describeNode", {
+          objectId,
+          depth: 0,
+        });
+        const node = description?.node;
+        const attributes = Array.isArray(node?.attributes) ? node.attributes : [];
+        const referenceIndex = attributes.indexOf("data-browser-mcp-ref");
+        if (referenceIndex < 0 || node?.backendNodeId == null) continue;
+        references.set(String(attributes[referenceIndex + 1]), {
+          backendNodeId: node.backendNodeId,
+          executionContextId: world.executionContextId,
+          objectId,
+        });
+      }
+    } catch {
+      // Sandboxed and browser-owned frames are intentionally absent from the element map.
+    }
+  }
+  return { references };
+}
+
+/** Return the viewport box CDP reports in main-frame CSS coordinates. */
+async function interactionBackendBox(debuggerTarget, target) {
+  const { model } = await chrome.debugger.sendCommand(debuggerTarget, "DOM.getBoxModel", {
+    objectId: target.objectId,
   });
-  if (!result || result.error) throw new Error(result?.error || "click failed");
-  await dispatchTrustedPointClick(debuggerTarget, result.point);
+  const quad = model?.border || model?.content;
+  if (!Array.isArray(quad) || quad.length < 8) return null;
+  const xs = [quad[0], quad[2], quad[4], quad[6]].map(Number);
+  const ys = [quad[1], quad[3], quad[5], quad[7]].map(Number);
+  const left = Math.min(...xs);
+  const right = Math.max(...xs);
+  const top = Math.min(...ys);
+  const bottom = Math.max(...ys);
+  if (![left, right, top, bottom].every(Number.isFinite)) return null;
+  return { left, top, right, bottom };
+}
+
+/** Send one trusted Chrome mouse click to a point captured in the latest screenshot. */
+async function executeTrustedClick(debuggerTarget, clickPoint) {
+  if (!debuggerTarget) throw new Error("trusted click requires an attached Chrome debugger");
+  if (!clickPoint || !Number.isFinite(clickPoint.x) || !Number.isFinite(clickPoint.y)) {
+    throw new Error("trusted click requires a point from the latest screenshot");
+  }
+  await dispatchTrustedPointerMove(debuggerTarget, clickPoint);
+  const hoverNode = await readInteractionHoverNode(debuggerTarget, clickPoint);
+  console.debug("[browser-mcp-extension] trusted visual click", {
+    x: clickPoint.x,
+    y: clickPoint.y,
+    hoverBackendNodeId: hoverNode?.backendNodeId ?? null,
+  });
+  await dispatchTrustedPointClick(debuggerTarget, clickPoint, false);
+}
+
+/** Read only the first topmost hover node at one screenshot-derived coordinate. */
+async function readInteractionHoverNode(debuggerTarget, point) {
+  const hit = await chrome.debugger.sendCommand(debuggerTarget, "DOM.getNodeForLocation", {
+    x: Math.round(point.x),
+    y: Math.round(point.y),
+    includeUserAgentShadowDOM: true,
+  });
+  const hitBackendNodeId = Number(hit?.backendNodeId);
+  return Number.isInteger(hitBackendNodeId) && hitBackendNodeId > 0
+    ? { backendNodeId: hitBackendNodeId }
+    : null;
 }
 
 /** Apply one bounded keyboard behavior and dispatch matching DOM keyboard events. */
@@ -1285,18 +1465,26 @@ async function executeScroll(tabId, args) {
   if (!result || result.error) throw new Error(result?.error || "scroll failed");
 }
 
-/** Enter text through native setters and standard input events used by controlled forms. */
-async function enterText(tabId, elementId, text, clear) {
-  const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId },
+/** Enter text through Chrome's trusted input pipeline after selecting the live editor range. */
+async function enterText(tabId, elementId, text, clear, debuggerTarget) {
+  if (!debuggerTarget) throw new Error("trusted text input requires an attached Chrome debugger");
+  const executions = await executeInteractionFrames(tabId, {
     world: "MAIN",
-    args: [elementId, text, clear],
-    func: (targetId, insertedText, shouldClear) => {
-      const escaped = CSS.escape(targetId);
-      const element = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
-      if (!(element instanceof HTMLElement)) {
-        return { error: `element reference is stale: ${targetId}; take a new snapshot` };
+    args: [elementId, clear],
+    func: (targetId, shouldClear) => {
+      const roots = [document];
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const candidate of roots[index].querySelectorAll("*")) {
+          if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+        }
       }
+      const escaped = CSS.escape(targetId);
+      let element = null;
+      for (const root of roots) {
+        element = root.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
+        if (element) break;
+      }
+      if (!(element instanceof HTMLElement)) return { skipped: true };
       const editable = element instanceof HTMLInputElement
         || element instanceof HTMLTextAreaElement
         || element.isContentEditable;
@@ -1307,55 +1495,40 @@ async function enterText(tabId, elementId, text, clear) {
       element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       element.focus();
       if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-        const oldValue = element.value;
-        const nextValue = shouldClear ? insertedText : oldValue + insertedText;
-        element.dispatchEvent(new InputEvent("beforeinput", {
-          bubbles: true,
-          composed: true,
-          cancelable: true,
-          data: insertedText,
-          inputType: "insertText",
-        }));
-        const prototype = element instanceof HTMLInputElement
-          ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-        if (setter) setter.call(element, nextValue);
-        else element.value = nextValue;
-        element.dispatchEvent(new InputEvent("input", {
-          bubbles: true,
-          composed: true,
-          data: insertedText,
-          inputType: "insertText",
-        }));
-        element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        const position = nextValue.length;
-        element.setSelectionRange(position, position);
+        if (shouldClear) {
+          element.select();
+        } else {
+          try {
+            element.setSelectionRange(element.value.length, element.value.length);
+          } catch {
+            // Email, number and other textual controls can reject setSelectionRange.
+          }
+        }
       } else {
-        element.dispatchEvent(new InputEvent("beforeinput", {
-          bubbles: true,
-          composed: true,
-          cancelable: true,
-          data: insertedText,
-          inputType: "insertText",
-        }));
-        element.textContent = shouldClear ? insertedText : (element.textContent || "") + insertedText;
-        element.dispatchEvent(new InputEvent("input", {
-          bubbles: true,
-          composed: true,
-          data: insertedText,
-          inputType: "insertText",
-        }));
         const selection = getSelection();
         const range = document.createRange();
         range.selectNodeContents(element);
-        range.collapse(false);
+        range.collapse(!shouldClear);
         selection?.removeAllRanges();
         selection?.addRange(range);
       }
       return { ok: true };
     },
-  });
+  }, true);
+  const result = executions.map((execution) => execution.result).find(
+    (candidate) => candidate && !candidate.skipped,
+  );
   if (!result || result.error) throw new Error(result?.error || "text target unavailable");
+  try {
+    await chrome.debugger.sendCommand(debuggerTarget, "Input.insertText", { text });
+  } catch (error) {
+    if (!String(error?.message || error).toLowerCase().includes("method")) throw error;
+    await chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchKeyEvent", {
+      type: "char",
+      text,
+      unmodifiedText: text,
+    });
+  }
 }
 
 /** Select a native option by exact value first, then by visible label. */
@@ -1399,28 +1572,18 @@ function boundedWait(value, fallback) {
   return Math.max(0, Math.min(30000, Number(value)));
 }
 
-/** Capture the isolated window without focusing it or changing the user's selected tab. */
-async function captureInteractionScreenshot(tabId, session) {
-  const tab = await chrome.tabs.get(tabId);
-  if (tab.windowId == null) throw new Error("interactive tab has no window");
-  if (tab.active !== true) {
-    if (interactionWindows.get(session) !== tab.windowId) {
-      throw new Error("refusing to activate an interaction tab in the user's current window");
-    }
-    await chrome.tabs.update(tabId, { active: true });
-  }
-  const elapsed = Date.now() - (lastScreenshotAt.get(tab.windowId) || 0);
-  if (elapsed < 600) {
-    await new Promise((resolve) => setTimeout(resolve, 600 - elapsed));
-  }
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+/** Capture the page surface that shares coordinates with trusted CDP mouse input. */
+async function captureInteractionScreenshot(debuggerTarget) {
+  if (!debuggerTarget) throw new Error("page-surface screenshot requires an attached Chrome debugger");
+  const captured = await chrome.debugger.sendCommand(debuggerTarget, "Page.captureScreenshot", {
     format: "jpeg",
     quality: 80,
+    fromSurface: true,
+    captureBeyondViewport: false,
   });
-  lastScreenshotAt.set(tab.windowId, Date.now());
-  const separator = dataUrl.indexOf(",");
-  const screenshotData = separator >= 0 ? dataUrl.slice(separator + 1) : "";
+  const screenshotData = String(captured?.data || "");
   if (!screenshotData) throw new Error("Chrome returned no screenshot data");
+  const dataUrl = `data:image/jpeg;base64,${screenshotData}`;
   const blob = await (await fetch(dataUrl)).blob();
   const bitmap = await createImageBitmap(blob);
   const width = bitmap.width;
@@ -1430,19 +1593,63 @@ async function captureInteractionScreenshot(tabId, session) {
   return { data: screenshotData, width, height };
 }
 
-/** Extract a fresh element map after the guarded action and screenshot have completed. */
-async function captureInteractionState(tabId, action, screenshot) {
-  let execution;
+/** Return a screenshot-only click result using layout metrics without page DOM traversal. */
+async function captureVisualClickState(tabId, screenshot, debuggerTarget) {
+  if (!debuggerTarget) throw new Error("visual click capture requires an attached Chrome debugger");
+  const [tab, metrics] = await Promise.all([
+    chrome.tabs.get(tabId),
+    chrome.debugger.sendCommand(debuggerTarget, "Page.getLayoutMetrics", {}),
+  ]);
+  const viewport = metrics?.cssVisualViewport || metrics?.visualViewport || {};
+  const content = metrics?.cssContentSize || metrics?.contentSize || {};
+  const width = Math.max(1, Number(viewport.clientWidth) || screenshot.width);
+  const height = Math.max(1, Number(viewport.clientHeight) || screenshot.height);
+  return {
+    state: {
+      action: "click",
+      url: String(tab.url || ""),
+      title: String(tab.title || ""),
+      screenshot_mime_type: "image/jpeg",
+      viewport: {
+        width,
+        height,
+        screenshot_width: screenshot.width,
+        screenshot_height: screenshot.height,
+        device_scale_factor: Math.max(0.1, screenshot.width / width),
+        scroll_x: Math.max(0, Math.round(Number(viewport.pageX) || 0)),
+        scroll_y: Math.max(0, Math.round(Number(viewport.pageY) || 0)),
+        document_width: Math.max(width, Math.round(Number(content.width) || width)),
+        document_height: Math.max(height, Math.round(Number(content.height) || height)),
+      },
+      elements: [],
+      visible_text: "",
+      warnings: ["Visual click result omits DOM metadata; take a new snapshot before a semantic action."],
+    },
+    screenshot_data: screenshot.data,
+    clickTargets: {},
+  };
+}
+
+/** Extract a fresh, frame-aware element map after the screenshot has completed. */
+async function captureInteractionState(tabId, action, screenshot, debuggerTarget) {
+  let executions;
   try {
-    execution = await chrome.scripting.executeScript({
-      target: { tabId },
+    executions = await executeInteractionFrames(tabId, {
       world: "MAIN",
       args: [INTERACTION_ELEMENT_LIMIT, INTERACTION_TEXT_LIMIT],
       func: (elementLimit, textLimit) => {
       const referenceAttribute = "data-browser-mcp-ref";
       const referencePrefix = crypto.randomUUID().slice(0, 8);
-      for (const previous of document.querySelectorAll(`[${referenceAttribute}]`)) {
-        previous.removeAttribute(referenceAttribute);
+      const roots = [document];
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot) roots.push(element.shadowRoot);
+        }
+      }
+      for (const root of roots) {
+        for (const previous of root.querySelectorAll(`[${referenceAttribute}]`)) {
+          previous.removeAttribute(referenceAttribute);
+        }
       }
       const selectors = [
         "a[href]", "button", "input:not([type='hidden'])", "textarea", "select", "summary",
@@ -1472,8 +1679,11 @@ async function captureInteractionState(tabId, action, screenshot) {
       };
       const accessibleName = (element) => {
         const labelledBy = element.getAttribute("aria-labelledby");
+        const nameRoot = element.getRootNode();
         const labelled = labelledBy
-          ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" ")
+          ? labelledBy.split(/\s+/).map(
+            (id) => nameRoot.getElementById?.(id)?.innerText || document.getElementById(id)?.innerText || "",
+          ).join(" ")
           : "";
         const label = element instanceof HTMLElement && "labels" in element
           ? [...(element.labels || [])].map((item) => item.innerText || "").join(" ")
@@ -1486,7 +1696,7 @@ async function captureInteractionState(tabId, action, screenshot) {
           || element.getAttribute("title") || valueLabel || element.innerText || "",
         ).replace(/\s+/g, " ").trim().slice(0, 240);
       };
-      const candidates = [...document.querySelectorAll(selectors)];
+      const candidates = roots.flatMap((root) => [...root.querySelectorAll(selectors)]);
       const elements = [];
       for (const element of candidates) {
         if (elements.length >= elementLimit) break;
@@ -1545,15 +1755,97 @@ async function captureInteractionState(tabId, action, screenshot) {
         warnings,
       };
       },
-    });
+    }, true);
   } catch (error) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     throw new Error(
       `page-state script failed at ${String(tab?.url || "closed")}: ${error?.message || error}`,
     );
   }
-  const [{ result: page } = {}] = execution;
+  const mainExecution = executions.find((execution) => execution.frameId === 0) || executions[0];
+  const page = mainExecution?.result;
   if (!page || typeof page.url !== "string") throw new Error("page snapshot script returned no data");
+  if (!debuggerTarget) throw new Error("page snapshot requires an attached Chrome debugger");
+
+  let backendNodes;
+  let skippedForeignExtensionFrames = false;
+  try {
+    backendNodes = await readInteractionBackendNodes(debuggerTarget);
+  } catch (error) {
+    if (!isForeignExtensionFrameError(error)) throw error;
+    backendNodes = { references: new Map() };
+    skippedForeignExtensionFrames = true;
+  }
+  const resolvedElements = [];
+  const clickTargets = {};
+  let unresolvedCount = 0;
+  const orderedExecutions = [
+    mainExecution,
+    ...executions.filter((execution) => execution !== mainExecution),
+  ];
+  for (const execution of orderedExecutions) {
+    if (skippedForeignExtensionFrames && execution !== mainExecution) continue;
+    for (const element of execution?.result?.elements || []) {
+      if (resolvedElements.length >= INTERACTION_ELEMENT_LIMIT) break;
+      if (skippedForeignExtensionFrames) {
+        resolvedElements.push(element);
+        continue;
+      }
+      const target = backendNodes.references.get(String(element.element_id));
+      if (!target) {
+        unresolvedCount += 1;
+        continue;
+      }
+      let box = null;
+      try {
+        box = await interactionBackendBox(debuggerTarget, target);
+      } catch {
+        unresolvedCount += 1;
+        continue;
+      }
+      if (
+        !box
+        || box.right <= 0
+        || box.bottom <= 0
+        || box.left >= page.viewport.width
+        || box.top >= page.viewport.height
+      ) continue;
+      resolvedElements.push({
+        ...element,
+        x: Math.round(box.left * 10) / 10,
+        y: Math.round(box.top * 10) / 10,
+        width: Math.round((box.right - box.left) * 10) / 10,
+        height: Math.round((box.bottom - box.top) * 10) / 10,
+      });
+      clickTargets[element.element_id] = target.backendNodeId;
+    }
+    if (resolvedElements.length >= INTERACTION_ELEMENT_LIMIT) break;
+  }
+
+  const frameText = orderedExecutions
+    .map((execution) => String(execution?.result?.visible_text || ""))
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, INTERACTION_TEXT_LIMIT);
+  const frameWarnings = orderedExecutions.flatMap(
+    (execution) => execution?.result?.warnings || [],
+  );
+  if (skippedForeignExtensionFrames) {
+    frameWarnings.push(
+      "Child frames were skipped because a browser extension owns an inaccessible frame.",
+    );
+  }
+  if (unresolvedCount > 0) {
+    frameWarnings.push(
+      `${unresolvedCount} frame or shadow-root elements could not be mapped to the screenshot.`,
+    );
+  }
+  if (resolvedElements.length >= INTERACTION_ELEMENT_LIMIT) {
+    frameWarnings.push(`Visible element list limited to ${INTERACTION_ELEMENT_LIMIT} across all frames.`);
+  }
+  page.elements = resolvedElements;
+  page.visible_text = frameText;
+  page.warnings = [...new Set(frameWarnings)];
   page.viewport.screenshot_width = screenshot.width;
   page.viewport.screenshot_height = screenshot.height;
   return {
@@ -1563,6 +1855,7 @@ async function captureInteractionState(tabId, action, screenshot) {
       screenshot_mime_type: "image/jpeg",
     },
     screenshot_data: screenshot.data,
+    clickTargets,
   };
 }
 
@@ -1710,8 +2003,8 @@ async function runZhihuInvitations(state, args, reply) {
   }
 }
 
-/** Dispatch one trusted click at an already validated viewport point without retrying it. */
-async function dispatchTrustedPointClick(debugTarget, point) {
+/** Move Chrome's trusted mouse pointer to one CSS viewport point. */
+async function dispatchTrustedPointerMove(debugTarget, point) {
   const position = { x: Number(point.x), y: Number(point.y) };
   await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
     type: "mouseMoved",
@@ -1719,6 +2012,12 @@ async function dispatchTrustedPointClick(debugTarget, point) {
     buttons: 0,
     ...position,
   });
+}
+
+/** Dispatch one trusted click at an already validated viewport point without retrying it. */
+async function dispatchTrustedPointClick(debugTarget, point, movePointer = true) {
+  const position = { x: Number(point.x), y: Number(point.y) };
+  if (movePointer) await dispatchTrustedPointerMove(debugTarget, position);
   await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
     type: "mousePressed",
     button: "left",

@@ -152,8 +152,8 @@ def create_server(
             "Read public webpages through the authenticated local Chrome extension. "
             "Use browser_read for a new immutable snapshot, browser_read_page for its "
             "remaining pages, and browser_status for connection diagnostics. For visual "
-            "interaction, call browser_snapshot first, prefer its current element_id values "
-            "over coordinates, and use the screenshot returned after each action to verify "
+            "interaction, call browser_snapshot first, choose x/y from its screenshot, and "
+            "use the screenshot returned after each action to verify "
             "the result. Element references expire whenever a new page state is returned. "
             "Ask for explicit user confirmation immediately before actions that publish, "
             "send, purchase, delete, or otherwise cause consequential external side effects. "
@@ -216,7 +216,7 @@ def create_server(
         coordinate_space: BrowserClickCoordinateSpace = BrowserClickCoordinateSpace.SCREENSHOT,
         wait_ms: int = 500,
     ) -> CallToolResult:
-        """Click one current element reference or screenshot/viewport coordinate."""
+        """Click one screenshot/viewport coordinate or one saved screenshot center."""
         request = BrowserClickRequest(
             element_id=element_id,
             x=x,
@@ -590,9 +590,11 @@ def create_server(
         _browser_click,
         name="browser_click",
         description=(
-            "Send one trusted Chrome click to a current browser_snapshot element_id. When "
-            "no semantic reference is available, x/y default to pixels in the returned "
-            "screenshot; set coordinate_space=viewport only for CSS viewport coordinates."
+            "Send one trusted Chrome click to x/y chosen from the current browser_snapshot "
+            "image. Coordinates default to pixels in that returned screenshot; set "
+            "coordinate_space=viewport only for CSS viewport coordinates. The click path "
+            "does not traverse DOM or frames and only samples the first topmost hover node. "
+            "An element_id is accepted only as shorthand for its saved screenshot center."
         ),
         annotations=ToolAnnotations(
             read_only_hint=False,

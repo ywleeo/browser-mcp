@@ -20,7 +20,8 @@ def test_release_versions_are_synchronized() -> None:
     )
     lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
     packages = cast(list[dict[str, Any]], lock["package"])
-    locked_project = next(package for package in packages if package.get("name") == "browser-mcp")
+    project_name = project["project"]["name"]
+    locked_project = next(package for package in packages if package.get("name") == project_name)
 
     assert project["project"]["version"] == __version__
     assert manifest["version"] == __version__

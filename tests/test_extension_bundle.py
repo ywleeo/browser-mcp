@@ -37,22 +37,57 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     background = (first.directory / "background.js").read_text(encoding="utf-8")
     assert "const URL_CHECK_TIMEOUT_MS = 20000;" in background
     assert 'message.type === "browser.interact"' in background
-    assert "chrome.tabs.captureVisibleTab" in background
+    manifest = json.loads((first.directory / "manifest.json").read_text(encoding="utf-8"))
+    assert "webNavigation" in manifest["permissions"]
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.captureScreenshot"' in background
+    assert "captureBeyondViewport: false" in background
     assert "chrome.windows.create" in background
     assert "focused: false" in background
     assert "chrome.tabs.update(tabId, { url, active: true })" not in background
     assert "chrome.tabs.update(tabId, { url })" in background
-    assert "refusing to activate an interaction tab in the user's current window" in background
-    assert "async function executeDomClick" in background
-    click_implementation = background.split("async function executeDomClick", 1)[1].split(
+    assert "chrome.tabs.captureVisibleTab" not in background
+    assert "async function executeTrustedClick" in background
+    click_implementation = background.split("async function executeTrustedClick", 1)[1].split(
         "/** Apply one bounded keyboard behavior", 1
     )[0]
     assert ".click()" not in click_implementation
-    assert "await dispatchTrustedPointClick(debuggerTarget, result.point)" in click_implementation
-    assert 'const needsDebugger = action === "click" || (' in background
+    assert "await dispatchTrustedPointerMove(debuggerTarget, clickPoint)" in click_implementation
+    assert "await readInteractionHoverNode(debuggerTarget, clickPoint)" in click_implementation
+    assert (
+        "await dispatchTrustedPointClick(debuggerTarget, clickPoint, false)"
+        in click_implementation
+    )
+    assert "DOM.resolveNode" not in click_implementation
+    assert "querySelector" not in click_implementation
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "DOM.getNodeForLocation"' in background
+    assert "async function readInteractionHoverNode" in background
+    assert "async function captureVisualClickState" in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.getLayoutMetrics"' in background
+    assert 'if (action !== "click") await removeForeignExtensionFrames(tabId);' in background
+    assert "async function focusManagedInteractionWindow" in background
+    assert 'chrome.windows.update(managedWindowId, { focused: true })' in background
+    assert "async function restoreInteractionWindowFocus" in background
+    assert "targets: visual.clickTargets" in background
+    assert "elements: visual.state.elements" in background
+    assert (
+        "debuggerSession = await interactionDebuggerSession(state, session, tabId);" in background
+    )
+    assert "async function executeInteractionFrames" in background
+    assert "chrome.webNavigation.getAllFrames({ tabId })" in background
+    assert "target: { tabId, frameIds: [frame.frameId] }" in background
+    assert "chrome-extension|moz-extension|safari-web-extension" in background
+    assert "function isForeignExtensionFrameError" in background
+    assert "async function removeForeignExtensionFrames" in background
+    assert 'root.querySelectorAll("iframe[src],frame[src]")' in background
+    assert "Child frames were skipped because a browser extension owns" in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.getFrameTree"' in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.createIsolatedWorld"' in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "DOM.describeNode"' in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Input.insertText"' in background
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchKeyEvent"' in background
     assert 'String(args.coordinate_space || "screenshot")' in background
+    assert "const scaleDifference = Math.abs(scaleX - scaleY)" in background
     assert "createImageBitmap(blob)" in background
-    assert 'new InputEvent("input"' in background
     assert 'referenceAttribute = "data-browser-mcp-ref"' in background
     assert "crypto.randomUUID().slice(0, 8)" in background
     assert 'document.querySelector(".note-scroller")' in background

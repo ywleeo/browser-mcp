@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 from mcp import ClientSession, StdioServerParameters, stdio_client
 
+from browser_mcp import __version__
 from tests.helpers import reserve_free_port
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,7 +85,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
             assert structured["state"] == "disconnected"
             assert structured["bridge_port"] == bridge_port
             assert structured["extension_dir"] == str(tmp_path / "extension")
-            assert structured["server_version"] == "0.11.0"
+            assert structured["server_version"] == __version__
             assert structured["install_mode"] == "source"
             assert structured["project_root"] == str(PROJECT_ROOT)
             assert "--check --json" in cast(str, structured["upgrade_check_command"])

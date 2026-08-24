@@ -165,7 +165,7 @@ class BrowserClickCoordinateSpace(StrEnum):
 
 
 class BrowserClickRequest(BaseModel):
-    """Validated element-reference or screenshot/viewport-coordinate click request."""
+    """Validated screenshot-coordinate click with optional saved-center shorthand."""
 
     element_id: str | None = Field(default=None, min_length=1, max_length=32)
     x: float | None = Field(default=None, ge=0)

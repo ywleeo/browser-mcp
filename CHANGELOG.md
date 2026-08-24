@@ -2,6 +2,24 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [未发布]
+
+## [0.12.2] - 2026-08-24
+
+### 修复
+
+- 通用视觉快照现在扫描全部可注入 frame 与开放 Shadow DOM，并通过 CDP pierced DOM 将元素框
+  统一映射到主视口；`browser_click` 则成为完全独立的截图坐标管线，不遍历 DOM 或 iframe，也不把
+  后端节点 ID 作为点击前置条件。它只移动可信鼠标、读取坐标下第一个最上层 hover 节点并按下释放；
+  `element_id` 仅作为最新截图中心点的简写。点击后仅用 CDP layout metrics 与新截图返回视觉结果。
+- `browser_type` 改用 Chrome `Input.insertText` 可信输入管线，不再直接改写 input、textarea 或
+  contenteditable 的 DOM 值；React 等受控编辑器会收到真实输入状态更新，避免正文已经显示但
+  提交按钮仍保持禁用。
+- frame 注入改为通过 `webNavigation` 逐个执行并跳过其他扩展拥有的 frame，避免密码管理器等
+  扩展在输入框聚焦后注入 `chrome-extension://` iframe，导致整个交互结果捕获失败。
+- 非点击语义操作会从 Browser MCP 隔离页面中移除外部扩展 iframe 容器；截图坐标点击完全绕开
+  iframe 处理。普通网页 iframe 与 reCAPTCHA frame 不受影响，避免密码管理器 frame 干扰交互。
+
 ## [0.12.1] - 2026-08-24
 
 ### 文档
