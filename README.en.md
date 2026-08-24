@@ -65,13 +65,26 @@ state but **never** returns or persists cookies over MCP.
 
 ### 2. Install
 
+**Option 1: pip (published, recommended)**
+
+```bash
+pip install ai-browser-mcp
+```
+
+Then run `browser-mcp` directly (the Chrome extension is bundled in the install; take its directory from
+the `extension_dir` returned by `browser_status` — loading it works the same way). To run a specific
+version on the fly, use `uvx ai-browser-mcp`.
+
+**Option 2: from source**
+
 ```bash
 git clone https://github.com/ywleeo/browser-mcp.git
 cd browser-mcp
 uv sync
 ```
 
-(`/path/to/browser-mcp` below is the absolute path to this repo on your machine.)
+(`/path/to/browser-mcp` below is the absolute path to this repo in the source setup. With a pip install
+you don't need a path — just run the `browser-mcp` command.)
 
 ### 3. Load the Chrome extension
 

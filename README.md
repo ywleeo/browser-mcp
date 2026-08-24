@@ -58,13 +58,25 @@ Browser MCP 是一个本地 MCP server。它让**任何支持 MCP 的 AI 助手*
 
 ### 2. 安装
 
+**方式一：pip（已发布，推荐）**
+
+```bash
+pip install ai-browser-mcp
+```
+
+装完即可直接运行 `browser-mcp`（Chrome 扩展已打包在安装内；扩展目录取 `browser_status` 返回的
+`extension_dir`，加载方式不变）。要临时开一个指定版本，可用 `uvx ai-browser-mcp`。
+
+**方式二：从源码**
+
 ```bash
 git clone https://github.com/ywleeo/browser-mcp.git
 cd browser-mcp
 uv sync
 ```
 
-下文中的 `/path/to/browser-mcp` 表示本项目在本机的绝对路径。
+下文中的 `/path/to/browser-mcp` 表示源码方式下本项目在本机的绝对路径；pip 安装时无需指定路径，
+直接使用 `browser-mcp` 命令即可。
 
 ### 3. 加载 Chrome 扩展
 
