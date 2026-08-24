@@ -4,6 +4,18 @@
 // capture its active tab without focusing the window, and guard every navigation.
 
 import { BUNDLE_BUILD_ID } from "./build-info.js";
+import {
+  SWEEP_ALARM_NAME,
+  closeAllCommentSessions,
+  closeCommentSession,
+  commentSessionHydration,
+  createCommentSession,
+  ensureDebuggerAttached,
+  findCommentSession,
+  forgetCommentSessionByTab,
+  suspendCommentSession,
+  sweepCommentSessions,
+} from "./comment_sessions.js";
 
 const DEFAULT_BASE_PORT = 17880;
 const DEFAULT_POOL_SIZE = 10;
@@ -18,6 +30,8 @@ const TEXT_LIMIT = 4_000_000;
 const XHR_BODY_LIMIT = 1_000_000;
 const XHR_TOTAL_LIMIT = 2_500_000;
 const SITE_ACTION_TIMEOUT_MS = 25000;
+// One comment-collection call runs at most this long before suspending into a resumable session.
+const DEFAULT_COMMENT_BUDGET_MS = 40000;
 const INTERACTION_TEXT_LIMIT = 12000;
 const INTERACTION_ELEMENT_LIMIT = 200;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
@@ -148,6 +162,13 @@ function sendJson(state, value) {
   }
 }
 
+/** Clamp one collection run's wall-clock budget requested by the Python adapter. */
+function commentBudgetMs(args) {
+  const requested = Number(args.budgetMs);
+  if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_COMMENT_BUDGET_MS;
+  return Math.max(5000, Math.min(600000, Math.round(requested)));
+}
+
 /** Ask the Python URL policy to approve one top-level navigation or redirect. */
 function requestUrlApproval(state, url) {
   return new Promise((resolve) => {
@@ -269,6 +290,7 @@ function connectPort(port, config) {
       void dispatchDouyinMutation(state, message);
     } else if (message.type === "bridge.shutdown") {
       void cleanupBridgeSessionsForPort(port);
+      void closeAllCommentSessions();
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -2096,53 +2118,97 @@ async function runXhsComments(state, args, reply) {
   const xsecSource = String(args.xsecSource || "pc_search");
   const maxComments = Math.max(1, Math.min(5000, Number(args.maxComments) || 500));
   const maxScrolls = Math.max(40, Math.min(220, Math.ceil(maxComments * 0.6)));
-  const target = new URL(`https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`);
-  if (xsecToken) target.searchParams.set("xsec_token", xsecToken);
-  if (xsecSource) target.searchParams.set("xsec_source", xsecSource);
-  const approval = await requestUrlApproval(state, target.toString());
-  if (!approval.allowed) {
-    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+  const deadline = Date.now() + commentBudgetMs(args);
+  const requestedSessionId = String(args.sessionId || "").trim();
+
+  await commentSessionHydration;
+  let session = requestedSessionId
+    ? findCommentSession(requestedSessionId, { platform: "xhs", fingerprint: noteId })
+    : null;
+  if (requestedSessionId && !session) {
+    reply({
+      ok: false,
+      error: `xhs comment session ${requestedSessionId} expired or belongs to another note; `
+        + "call again without a session id to restart collection",
+    });
     return;
   }
 
-  let tabId = null;
-  let windowId = null;
-  let debugTarget = null;
   const pages = [];
-  const seenIds = new Set();
-  const progress = { sawRootPage: false, rootComplete: false };
-  let expectedCount = null;
-  let scrolls = 0;
+  const seenIds = session ? session.seen : new Set();
+  const progress = session ? session.progress : { sawRootPage: false, rootComplete: false };
+  const loop = session ? session.loop : {
+    expectedCount: null,
+    scrolls: 0,
+    stableRounds: 0,
+    previousHeight: -1,
+    previousCount: -1,
+    scrollDirection: 1,
+    sweepTurns: 0,
+  };
+  let tabId = session ? session.tabId : null;
+  let debugTarget = null;
   let complete = false;
   let limitReached = false;
-  let stableRounds = 0;
-  let previousHeight = -1;
-  let previousCount = -1;
-  let scrollDirection = 1;
-  let sweepTurns = 0;
+  let budgetExhausted = false;
 
   try {
-    const createdWindow = await chrome.windows.create({
-      url: "https://www.xiaohongshu.com/explore",
-      focused: false,
-      type: "normal",
-    });
-    const [tab] = createdWindow.tabs || [];
-    tabId = tab?.id;
-    windowId = createdWindow.id;
-    if (tabId == null || windowId == null) {
-      throw new Error("Chrome did not create an isolated XHS comments window");
+    let pending;
+    if (session) {
+      pending = pendingXhsComments.get(tabId);
+      if (!pending) {
+        pending = { responses: [], errors: [] };
+        pendingXhsComments.set(tabId, pending);
+      }
+      debugTarget = { tabId };
+      await ensureDebuggerAttached(debugTarget);
+    } else {
+      const target = new URL(`https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`);
+      if (xsecToken) target.searchParams.set("xsec_token", xsecToken);
+      if (xsecSource) target.searchParams.set("xsec_source", xsecSource);
+      const approval = await requestUrlApproval(state, target.toString());
+      if (!approval.allowed) {
+        reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+        return;
+      }
+      const createdWindow = await chrome.windows.create({
+        url: "https://www.xiaohongshu.com/explore",
+        focused: false,
+        type: "normal",
+      });
+      const [tab] = createdWindow.tabs || [];
+      tabId = tab?.id ?? null;
+      if (tabId == null || createdWindow.id == null) {
+        if (createdWindow.id != null) await chrome.windows.remove(createdWindow.id).catch(() => {});
+        throw new Error("Chrome did not create an isolated XHS comments window");
+      }
+      // Own the window through the session from here on, so every later failure closes it once.
+      session = await createCommentSession({
+        platform: "xhs",
+        fingerprint: noteId,
+        tabId,
+        windowId: createdWindow.id,
+        seen: seenIds,
+        progress,
+        loop,
+        release: (closed) => pendingXhsComments.delete(closed.tabId),
+      });
+      await waitForTabComplete(tabId);
+      pending = { responses: [], errors: [] };
+      pendingXhsComments.set(tabId, pending);
+      await chrome.tabs.update(tabId, { url: target.toString() });
+      await waitForTabComplete(tabId);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      debugTarget = { tabId };
+      await ensureDebuggerAttached(debugTarget);
     }
-    await waitForTabComplete(tabId);
-    const pending = { responses: [], errors: [] };
-    pendingXhsComments.set(tabId, pending);
-    await chrome.tabs.update(tabId, { url: target.toString() });
-    await waitForTabComplete(tabId);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    debugTarget = { tabId };
-    await chrome.debugger.attach(debugTarget, "1.3");
 
-    for (scrolls = 0; scrolls < maxScrolls; scrolls += 1) {
+    while (loop.scrolls < maxScrolls) {
+      if (Date.now() >= deadline) {
+        budgetExhausted = true;
+        break;
+      }
+      loop.scrolls += 1;
       if (pending.errors.length) throw new Error(pending.errors.shift());
       drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
 
@@ -2184,20 +2250,20 @@ async function runXhsComments(state, args, reply) {
         },
       });
       if (!ui || ui.error) throw new Error(ui?.error || "XHS comment stream returned no state");
-      if (Number.isFinite(ui.expectedCount)) expectedCount = Number(ui.expectedCount);
+      if (Number.isFinite(ui.expectedCount)) loop.expectedCount = Number(ui.expectedCount);
 
       let directionChanged = false;
-      const needsReplySweep = expectedCount != null
-        && seenIds.size < expectedCount
+      const needsReplySweep = loop.expectedCount != null
+        && seenIds.size < loop.expectedCount
         && progress.rootComplete;
-      if (ui.clicked === 0 && needsReplySweep && sweepTurns < 4) {
-        if (scrollDirection > 0 && ui.atBottom) {
-          scrollDirection = -1;
-          sweepTurns += 1;
+      if (ui.clicked === 0 && needsReplySweep && loop.sweepTurns < 4) {
+        if (loop.scrollDirection > 0 && ui.atBottom) {
+          loop.scrollDirection = -1;
+          loop.sweepTurns += 1;
           directionChanged = true;
-        } else if (scrollDirection < 0 && ui.atTop) {
-          scrollDirection = 1;
-          sweepTurns += 1;
+        } else if (loop.scrollDirection < 0 && ui.atTop) {
+          loop.scrollDirection = 1;
+          loop.sweepTurns += 1;
           directionChanged = true;
         }
       }
@@ -2208,7 +2274,7 @@ async function runXhsComments(state, args, reply) {
           x: Number(ui.wheelX),
           y: Number(ui.wheelY),
           deltaX: 0,
-          deltaY: wheelDelta * scrollDirection,
+          deltaY: wheelDelta * loop.scrollDirection,
         });
       }
 
@@ -2216,16 +2282,17 @@ async function runXhsComments(state, args, reply) {
       if (pending.errors.length) throw new Error(pending.errors.shift());
       drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
 
-      const unchanged = previousCount === seenIds.size && previousHeight === ui.scrollHeight;
-      const atSweepBoundary = scrollDirection > 0 ? ui.atBottom : ui.atTop;
-      stableRounds = unchanged && ui.clicked === 0 && atSweepBoundary && !directionChanged
-        ? stableRounds + 1
+      const unchanged = loop.previousCount === seenIds.size
+        && loop.previousHeight === ui.scrollHeight;
+      const atSweepBoundary = loop.scrollDirection > 0 ? ui.atBottom : ui.atTop;
+      loop.stableRounds = unchanged && ui.clicked === 0 && atSweepBoundary && !directionChanged
+        ? loop.stableRounds + 1
         : 0;
-      previousCount = seenIds.size;
-      previousHeight = ui.scrollHeight;
+      loop.previousCount = seenIds.size;
+      loop.previousHeight = ui.scrollHeight;
 
-      const expectedReached = expectedCount != null && seenIds.size >= expectedCount;
-      const reachedNaturalEnd = expectedCount != null
+      const expectedReached = loop.expectedCount != null && seenIds.size >= loop.expectedCount;
+      const reachedNaturalEnd = loop.expectedCount != null
         ? expectedReached
         : progress.rootComplete || ui.endText;
       if (seenIds.size >= maxComments && !expectedReached) {
@@ -2233,35 +2300,40 @@ async function runXhsComments(state, args, reply) {
         break;
       }
       if (
-        stableRounds >= 2
+        loop.stableRounds >= 2
         && ui.clicked === 0
         && reachedNaturalEnd
       ) {
         complete = true;
         break;
       }
-      if (stableRounds >= 10) break;
+      if (loop.stableRounds >= 10) break;
     }
 
     drainXhsCommentResponses(pending, noteId, pages, seenIds, progress);
-    if (expectedCount != null && seenIds.size >= expectedCount && !limitReached) complete = true;
+    if (loop.expectedCount != null && seenIds.size >= loop.expectedCount && !limitReached) {
+      complete = true;
+    }
+    // Only a budget stop is resumable: every other exit means this note has nothing left to give.
+    const suspended = budgetExhausted && !complete && !limitReached;
+    if (suspended) await suspendCommentSession(session);
+    else await closeCommentSession(session);
     reply({
       ok: true,
       data: {
-        expected_count: expectedCount,
+        expected_count: loop.expectedCount,
         complete,
         limit_reached: limitReached,
-        scrolls: Math.min(scrolls + 1, maxScrolls),
+        budget_exhausted: budgetExhausted,
+        session_id: suspended ? session.id : null,
+        collected_total: seenIds.size,
+        scrolls: loop.scrolls,
         pages,
       },
     });
   } catch (error) {
+    if (session) await closeCommentSession(session);
     reply({ ok: false, error: String(error?.message || error) });
-  } finally {
-    if (tabId != null) pendingXhsComments.delete(tabId);
-    if (debugTarget != null) await chrome.debugger.detach(debugTarget).catch(() => {});
-    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
-    else if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
   }
 }
 
@@ -3102,56 +3174,100 @@ async function runDouyinComments(state, args, reply) {
   }
   const maxComments = Math.max(1, Math.min(5000, Number(args.maxComments) || 500));
   const maxScrolls = Math.max(80, Math.min(320, Math.ceil(maxComments * 0.75)));
-  const target = new URL(`https://www.douyin.com/${pageKind}/${awemeId}`);
-  const approval = await requestUrlApproval(state, target.toString());
-  if (!approval.allowed) {
-    reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+  const deadline = Date.now() + commentBudgetMs(args);
+  const requestedSessionId = String(args.sessionId || "").trim();
+
+  await commentSessionHydration;
+  let session = requestedSessionId
+    ? findCommentSession(requestedSessionId, { platform: "douyin", fingerprint: awemeId })
+    : null;
+  if (requestedSessionId && !session) {
+    reply({
+      ok: false,
+      error: `douyin comment session ${requestedSessionId} expired or belongs to another post; `
+        + "call again without a session id to restart collection",
+    });
     return;
   }
 
-  let tabId = null;
-  let windowId = null;
-  let debugTarget = null;
   const pages = [];
-  const seenIds = new Set();
-  const progress = {
+  const seenIds = session ? session.seen : new Set();
+  const progress = session ? session.progress : {
     sawRootPage: false,
     rootComplete: false,
     expectedCount: null,
     replyRoots: new Set(),
     completedReplyRoots: new Set(),
   };
-  let scrolls = 0;
+  const loop = session ? session.loop : {
+    scrolls: 0,
+    stableRounds: 0,
+    previousHeight: -1,
+    previousCount: -1,
+    scrollDirection: 1,
+    sweepTurns: 0,
+  };
+  let tabId = session ? session.tabId : null;
+  let debugTarget = null;
   let complete = false;
   let limitReached = false;
-  let stableRounds = 0;
-  let previousHeight = -1;
-  let previousCount = -1;
-  let scrollDirection = 1;
-  let sweepTurns = 0;
+  let budgetExhausted = false;
 
   try {
-    const createdWindow = await chrome.windows.create({
-      url: "https://www.douyin.com/",
-      focused: false,
-      type: "normal",
-    });
-    const [tab] = createdWindow.tabs || [];
-    tabId = tab?.id;
-    windowId = createdWindow.id;
-    if (tabId == null || windowId == null) {
-      throw new Error("Chrome did not create an isolated Douyin comments window");
+    let pending;
+    if (session) {
+      pending = pendingDouyinComments.get(tabId);
+      if (!pending) {
+        pending = { responses: [], errors: [] };
+        pendingDouyinComments.set(tabId, pending);
+      }
+      debugTarget = { tabId };
+      await ensureDebuggerAttached(debugTarget);
+    } else {
+      const target = new URL(`https://www.douyin.com/${pageKind}/${awemeId}`);
+      const approval = await requestUrlApproval(state, target.toString());
+      if (!approval.allowed) {
+        reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
+        return;
+      }
+      const createdWindow = await chrome.windows.create({
+        url: "https://www.douyin.com/",
+        focused: false,
+        type: "normal",
+      });
+      const [tab] = createdWindow.tabs || [];
+      tabId = tab?.id ?? null;
+      if (tabId == null || createdWindow.id == null) {
+        if (createdWindow.id != null) await chrome.windows.remove(createdWindow.id).catch(() => {});
+        throw new Error("Chrome did not create an isolated Douyin comments window");
+      }
+      // Own the window through the session from here on, so every later failure closes it once.
+      session = await createCommentSession({
+        platform: "douyin",
+        fingerprint: awemeId,
+        tabId,
+        windowId: createdWindow.id,
+        seen: seenIds,
+        progress,
+        loop,
+        release: (closed) => pendingDouyinComments.delete(closed.tabId),
+      });
+      await waitForTabComplete(tabId);
+      pending = { responses: [], errors: [] };
+      pendingDouyinComments.set(tabId, pending);
+      await chrome.tabs.update(tabId, { url: target.toString() });
+      await waitForTabComplete(tabId);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      debugTarget = { tabId };
+      await ensureDebuggerAttached(debugTarget);
     }
-    await waitForTabComplete(tabId);
-    const pending = { responses: [], errors: [] };
-    pendingDouyinComments.set(tabId, pending);
-    await chrome.tabs.update(tabId, { url: target.toString() });
-    await waitForTabComplete(tabId);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    debugTarget = { tabId };
-    await chrome.debugger.attach(debugTarget, "1.3");
 
-    for (scrolls = 0; scrolls < maxScrolls; scrolls += 1) {
+    while (loop.scrolls < maxScrolls) {
+      if (Date.now() >= deadline) {
+        budgetExhausted = true;
+        break;
+      }
+      loop.scrolls += 1;
       if (pending.errors.length) throw new Error(pending.errors.shift());
       drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
 
@@ -3239,14 +3355,14 @@ async function runDouyinComments(state, args, reply) {
 
       let directionChanged = false;
       const needsReplySweep = progress.rootComplete && !douyinReplyStreamsComplete(progress);
-      if (ui.clicked === 0 && needsReplySweep && sweepTurns < 4) {
-        if (scrollDirection > 0 && ui.atBottom) {
-          scrollDirection = -1;
-          sweepTurns += 1;
+      if (ui.clicked === 0 && needsReplySweep && loop.sweepTurns < 4) {
+        if (loop.scrollDirection > 0 && ui.atBottom) {
+          loop.scrollDirection = -1;
+          loop.sweepTurns += 1;
           directionChanged = true;
-        } else if (scrollDirection < 0 && ui.atTop) {
-          scrollDirection = 1;
-          sweepTurns += 1;
+        } else if (loop.scrollDirection < 0 && ui.atTop) {
+          loop.scrollDirection = 1;
+          loop.sweepTurns += 1;
           directionChanged = true;
         }
       }
@@ -3259,7 +3375,7 @@ async function runDouyinComments(state, args, reply) {
           tabId,
           debugTarget,
           ui,
-          wheelDelta * scrollDirection,
+          wheelDelta * loop.scrollDirection,
         );
       }
 
@@ -3267,13 +3383,14 @@ async function runDouyinComments(state, args, reply) {
       if (pending.errors.length) throw new Error(pending.errors.shift());
       drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
 
-      const unchanged = previousCount === seenIds.size && previousHeight === ui.scrollHeight;
-      const atBoundary = scrollDirection > 0 ? ui.atBottom : ui.atTop;
-      stableRounds = unchanged && ui.clicked === 0 && atBoundary && !directionChanged
-        ? stableRounds + 1
+      const unchanged = loop.previousCount === seenIds.size
+        && loop.previousHeight === ui.scrollHeight;
+      const atBoundary = loop.scrollDirection > 0 ? ui.atBottom : ui.atTop;
+      loop.stableRounds = unchanged && ui.clicked === 0 && atBoundary && !directionChanged
+        ? loop.stableRounds + 1
         : 0;
-      previousCount = seenIds.size;
-      previousHeight = ui.scrollHeight;
+      loop.previousCount = seenIds.size;
+      loop.previousHeight = ui.scrollHeight;
 
       const expectedReached = progress.expectedCount != null
         && seenIds.size >= progress.expectedCount;
@@ -3282,11 +3399,14 @@ async function runDouyinComments(state, args, reply) {
         limitReached = true;
         break;
       }
-      if (stableRounds >= 2 && (expectedReached || streamsComplete)) {
+      if (loop.stableRounds >= 2 && (expectedReached || streamsComplete)) {
         complete = true;
         break;
       }
-      if (stableRounds >= 10 || (ui.endText && progress.rootComplete && stableRounds >= 2)) break;
+      if (
+        loop.stableRounds >= 10
+        || (ui.endText && progress.rootComplete && loop.stableRounds >= 2)
+      ) break;
     }
 
     drainDouyinCommentResponses(pending, awemeId, pages, seenIds, progress);
@@ -3295,22 +3415,26 @@ async function runDouyinComments(state, args, reply) {
       && douyinReplyStreamsComplete(progress)
       && !limitReached
     ) complete = true;
+    // Only a budget stop is resumable: every other exit means this post has nothing left to give.
+    const suspended = budgetExhausted && !complete && !limitReached;
+    if (suspended) await suspendCommentSession(session);
+    else await closeCommentSession(session);
     reply({
       ok: true,
       data: {
         complete,
         limit_reached: limitReached,
-        scrolls: Math.min(scrolls + 1, maxScrolls),
+        budget_exhausted: budgetExhausted,
+        session_id: suspended ? session.id : null,
+        collected_total: seenIds.size,
+        expected_count: progress.expectedCount,
+        scrolls: loop.scrolls,
         pages,
       },
     });
   } catch (error) {
+    if (session) await closeCommentSession(session);
     reply({ ok: false, error: String(error?.message || error) });
-  } finally {
-    if (tabId != null) pendingDouyinComments.delete(tabId);
-    if (debugTarget != null) await chrome.debugger.detach(debugTarget).catch(() => {});
-    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
-    else if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
   }
 }
 
@@ -3331,8 +3455,10 @@ async function connectAll() {
 }
 
 chrome.alarms.create("browser-mcp-keepalive", { periodInMinutes: 1 });
+chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "browser-mcp-keepalive") connectAll();
+  else if (alarm.name === SWEEP_ALARM_NAME) void sweepCommentSessions();
 });
 chrome.runtime.onInstalled.addListener(connectAll);
 chrome.runtime.onStartup.addListener(connectAll);
@@ -3346,6 +3472,7 @@ chrome.debugger.onDetach.addListener((source) => {
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void forgetCommentSessionByTab(tabId);
   for (const [session, managedTabId] of interactiveTabs.entries()) {
     if (managedTabId !== tabId) continue;
     void deleteInteractionSession(session);

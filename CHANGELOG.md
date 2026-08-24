@@ -2,7 +2,26 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
-## [Unreleased]
+## [0.12.0] - 2026-08-24
+
+### 发布与文档
+
+- 包名改为 `ai-browser-mcp`（PyPI 原名 `browser-mcp` 已被占用），并新增基于 PyPI trusted
+  publishing 的 `.github/workflows/publish.yml`，打 `v*` tag 时自动构建并发布。
+- README 重写为 pitch 前置：开头突出「让你的 AI 真正搜遍全网、登录能访问的站点都能抓、还能后台
+  自动化操作」，并新增英文版 `README.en.md`；PyPI 页面以此为 `readme`。
+
+### 改进
+
+- `xhs_comments` 与 `douyin_comments` 改为限时采集：一次调用在 `time_budget_seconds`
+  （默认 40 秒）到点后挂起而不是超时失败，返回本次新抓到的评论、`collected_total` 进度和
+  可续抓的 `session_id`；带上该 `session_id` 再次调用即从上次的滚动位置、去重集合和分页
+  状态继续，不重复已抓过的评论。此前热门作品的评论采集会在 MCP 客户端 60 秒超时时整批丢弃。
+- 新增 `extension/comment_sessions.js`：评论采集会话的窗口、去重集合与循环状态在调用之间
+  存活，镜像到 `chrome.storage.session` 以便 service worker 回收后恢复或清理，闲置 5 分钟
+  由 alarm 关闭，配对进程退出时立即全部释放。
+- 评论采集的 bridge 超时不再是固定 180 秒，而是按本次预算加 15 秒余量，触发它明确表示扩展
+  卡死而非采集慢。
 
 ### 修复
 

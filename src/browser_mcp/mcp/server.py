@@ -34,6 +34,7 @@ from browser_mcp.models import (
 from browser_mcp.sites import SiteService
 from browser_mcp.sites.media import MediaDownloader, ProgressCallback
 from browser_mcp.sites.models import (
+    DEFAULT_COMMENT_BUDGET_SECONDS,
     BilibiliDownloadRequest,
     BilibiliDownloadResult,
     BilibiliSearchOrder,
@@ -401,9 +402,21 @@ def create_server(
         )
         return await websites.xhs_download(request)
 
-    async def _xhs_comments(url: str, max_comments: int = 500) -> XhsCommentsResult:
+    async def _xhs_comments(
+        url: str,
+        max_comments: int = 500,
+        session_id: str | None = None,
+        time_budget_seconds: float = DEFAULT_COMMENT_BUDGET_SECONDS,
+    ) -> XhsCommentsResult:
         """Collect top-level comments and replies from one Xiaohongshu note."""
-        request = XhsCommentsRequest.model_validate({"url": url, "max_comments": max_comments})
+        request = XhsCommentsRequest.model_validate(
+            {
+                "url": url,
+                "max_comments": max_comments,
+                "session_id": session_id,
+                "time_budget_seconds": time_budget_seconds,
+            }
+        )
         return await websites.xhs_comments(request)
 
     async def _xhs_user_notes(
@@ -452,9 +465,21 @@ def create_server(
         )
         return await websites.douyin_download(request)
 
-    async def _douyin_comments(url: str, max_comments: int = 500) -> DouyinCommentsResult:
+    async def _douyin_comments(
+        url: str,
+        max_comments: int = 500,
+        session_id: str | None = None,
+        time_budget_seconds: float = DEFAULT_COMMENT_BUDGET_SECONDS,
+    ) -> DouyinCommentsResult:
         """Collect root comments and expanded replies from one Douyin post."""
-        request = DouyinCommentsRequest.model_validate({"url": url, "max_comments": max_comments})
+        request = DouyinCommentsRequest.model_validate(
+            {
+                "url": url,
+                "max_comments": max_comments,
+                "session_id": session_id,
+                "time_budget_seconds": time_budget_seconds,
+            }
+        )
         return await websites.douyin_comments(request)
 
     async def _google_search(keyword: str, limit: int = 10) -> WebSearchResult:
@@ -824,7 +849,11 @@ def create_server(
         name="xhs_comments",
         description=(
             "Collect Xiaohongshu comments and replies by scrolling the note's own comment "
-            "stream; returns completeness and limit metadata."
+            "stream. One call collects for time_budget_seconds and then returns what it has "
+            "instead of failing: when complete is false and session_id is set, call again with "
+            "the same url plus that session_id to resume from where the last call stopped. "
+            "Each call returns only the comments it newly collected; collected_total and total "
+            "report overall progress. A session is dropped after five idle minutes."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,
@@ -929,8 +958,12 @@ def create_server(
         _douyin_comments,
         name="douyin_comments",
         description=(
-            "Collect Douyin comments and replies from the post's rendered comment stream; "
-            "returns completeness and limit metadata."
+            "Collect Douyin comments and replies from the post's rendered comment stream. "
+            "One call collects for time_budget_seconds and then returns what it has instead of "
+            "failing: when complete is false and session_id is set, call again with the same url "
+            "plus that session_id to resume from where the last call stopped. Each call returns "
+            "only the comments it newly collected; collected_total and total report overall "
+            "progress. A session is dropped after five idle minutes."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,

@@ -221,8 +221,84 @@ async def test_xhs_comments_routes_stream_limit_and_security_parameters(tmp_path
             "xsecToken": "a+b",
             "xsecSource": "pc_search",
             "maxComments": 123,
+            "budgetMs": 40_000,
+            "sessionId": "",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_xhs_comments_resume_forwards_session_and_sizes_its_own_timeout(
+    tmp_path: Path,
+) -> None:
+    """A budgeted call must outlive its own budget and carry the resume ticket unchanged."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("xhs.fetch", "comments")] = {
+        "expected_count": 185,
+        "complete": False,
+        "budget_exhausted": True,
+        "session_id": "session-1",
+        "collected_total": 60,
+        "pages": [],
+        "scrolls": 40,
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    request = XhsCommentsRequest.model_validate(
+        {
+            "url": "https://www.xiaohongshu.com/explore/n1?xsec_token=t&xsec_source=pc_search",
+            "session_id": "session-1",
+            "time_budget_seconds": 90,
+        }
+    )
+
+    result = await service.xhs_comments(request)
+
+    assert result.complete is False
+    assert result.budget_exhausted is True
+    assert result.session_id == "session-1"
+    assert result.collected_total == 60
+    assert bridge.site_requests[0][2]["budgetMs"] == 90_000
+    assert bridge.site_requests[0][2]["sessionId"] == "session-1"
+    assert bridge.site_timeouts[0] == 105.0
+
+
+@pytest.mark.asyncio
+async def test_douyin_comments_forwards_budget_and_session(tmp_path: Path) -> None:
+    """Douyin collection shares the budgeted, resumable contract with Xiaohongshu."""
+    bridge = FakeBridge(tmp_path / "extension")
+    bridge.site_responses[("douyin.fetch", "comments")] = {
+        "complete": False,
+        "budget_exhausted": True,
+        "session_id": "session-2",
+        "collected_total": 12,
+        "pages": [],
+        "scrolls": 80,
+    }
+    browser = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    service = SiteService(browser)
+    request = DouyinCommentsRequest.model_validate(
+        {
+            "url": "https://www.douyin.com/video/7478048831087725875",
+            "session_id": "session-2",
+        }
+    )
+
+    result = await service.douyin_comments(request)
+
+    assert result.session_id == "session-2"
+    assert result.budget_exhausted is True
+    assert bridge.site_requests[0][2]["sessionId"] == "session-2"
+    assert bridge.site_requests[0][2]["budgetMs"] == 40_000
+    assert bridge.site_timeouts[0] == 55.0
 
 
 @pytest.mark.asyncio

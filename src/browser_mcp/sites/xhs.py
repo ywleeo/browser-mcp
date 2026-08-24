@@ -305,13 +305,17 @@ def shape_xhs_comments(
         for index, comment_id in enumerate(selected_ids, start=1)
     )
     total = _optional_integer(raw.get("expected_count"))
+    session_id = _string(raw.get("session_id")) or None
     return XhsCommentsResult(
         note_id=identity.note_id,
         url=_build_note_url(identity.note_id, identity.xsec_token, identity.xsec_source),
         total=total if total is not None and total >= 0 else None,
         fetched=len(items),
+        collected_total=_optional_integer(raw.get("collected_total")) or len(items),
         complete=raw.get("complete") is True and not limit_reached,
         limit_reached=limit_reached,
+        budget_exhausted=raw.get("budget_exhausted") is True,
+        session_id=session_id,
         pages_fetched=len(pages),
         scrolls=_optional_integer(raw.get("scrolls")) or 0,
         items=items,

@@ -28,6 +28,7 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert (first.directory / "content_bridge.js").is_file()
     assert (first.directory / "douyin_content_inject.js").is_file()
     assert (first.directory / "douyin_content_bridge.js").is_file()
+    assert (first.directory / "comment_sessions.js").is_file()
     assert first.build_id in (first.directory / "build-info.js").read_text(encoding="utf-8")
     assert pairing["base_port"] == 17_880
     assert pairing["pool_size"] == 10
@@ -57,7 +58,12 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert 'document.querySelector(".note-scroller")' in background
     assert 'type: "mouseWheel"' in background
     assert "scrollerRect.left + scrollerRect.width / 2" in background
-    assert "wheelDelta * scrollDirection" in background
+    assert "wheelDelta * loop.scrollDirection" in background
+    assert "const DEFAULT_COMMENT_BUDGET_MS = 40000;" in background
+    assert 'from "./comment_sessions.js"' in background
+    sessions = (first.directory / "comment_sessions.js").read_text(encoding="utf-8")
+    assert "export function findCommentSession" in sessions
+    assert "export async function suspendCommentSession" in sessions
     assert "if (ui.clicked === 0)" in background
     assert "scroller.scrollTop = scroller.scrollHeight" not in background
     assert "function readXhsNoteRuntimeState" in background

@@ -279,3 +279,48 @@ def test_shape_xhs_comments_flattens_replies_and_deduplicates_pages() -> None:
     assert result.items[2].parent_comment_id == "c2"
     assert result.items[2].reply_to == "回复者"
     assert result.items[1].published_at_ms == 1_700_000_001_000
+    assert result.session_id is None
+    assert result.budget_exhausted is False
+    assert result.collected_total == 3
+
+
+def test_shape_xhs_comments_keeps_resume_ticket_for_a_budget_stop() -> None:
+    """A budget stop is partial data plus a ticket, never a failure."""
+    request = XhsCommentsRequest.model_validate(
+        {"url": "https://www.xiaohongshu.com/explore/n1?xsec_token=token"}
+    )
+    identity = parse_xhs_note_url(str(request.url))
+    raw = {
+        "expected_count": 185,
+        "complete": False,
+        "budget_exhausted": True,
+        "session_id": "session-1",
+        "collected_total": 61,
+        "scrolls": 44,
+        "pages": [
+            {
+                "kind": "root",
+                "payload": {
+                    "data": {
+                        "comments": [
+                            {
+                                "id": "c1",
+                                "content": "顶层评论",
+                                "create_time": 1_700_000_000,
+                                "user_info": {"user_id": "u1", "nickname": "作者"},
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+
+    result = shape_xhs_comments(raw, identity, request)
+
+    assert result.complete is False
+    assert result.budget_exhausted is True
+    assert result.session_id == "session-1"
+    assert result.total == 185
+    assert result.fetched == 1
+    assert result.collected_total == 61

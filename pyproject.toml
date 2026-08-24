@@ -3,10 +3,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "browser-mcp"
-version = "0.11.0"
+name = "ai-browser-mcp"
+version = "0.12.0"
 description = "Local MCP server for reading and interacting with web pages through real Chrome."
-readme = "README.md"
+readme = "README.en.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "ywleeo" }]
@@ -35,6 +35,7 @@ packages = ["src/browser_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "extension/background.js" = "browser_mcp/extension/background.js"
+"extension/comment_sessions.js" = "browser_mcp/extension/comment_sessions.js"
 "extension/content_bridge.js" = "browser_mcp/extension/content_bridge.js"
 "extension/content_inject.js" = "browser_mcp/extension/content_inject.js"
 "extension/douyin_content_bridge.js" = "browser_mcp/extension/douyin_content_bridge.js"
