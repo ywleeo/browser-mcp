@@ -1,7 +1,7 @@
 # Browser MCP
 
 [![M8ven Verified](https://m8ven.ai/badge/mcp/ywleeo-browser-mcp-1fpz06)](https://m8ven.ai/mcp/ywleeo-browser-mcp-1fpz06)
-[![PyPI version](https://img.shields.io/pypi/v/ai-browser-mcp)](https://pypi.org/project/ai-browser-mcp/)
+[![PyPI version](https://img.shields.io/pypi/v/ai-browser-mcp)](https://pypi.org/project/ai-browser-mcp/) [![awesome dsh plugin](https://img.shields.io/badge/awesome_dsh_plugin-listed-brightgreen)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
 
 [English](README.en.md) · [中文](README.md)
 
