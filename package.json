@@ -1,0 +1,28 @@
+{
+  "name": "@ywleeo/dsh-browser-mcp",
+  "version": "0.1.0",
+  "description": "dsh bundle: register ywleeo/browser-mcp (a local MCP server driving a real Chrome to search, capture, and automate any logged-in site) as native dsh MCP tools (mcp__browser__*).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ywleeo/browser-mcp.git"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "index.js",
+    "package.json",
+    "README.md",
+    "README.en.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": "0.1.1-rc.2"
+  },
+  "main": "./index.js",
+  "exports": "./index.js"
+}

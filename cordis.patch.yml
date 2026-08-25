@@ -1,0 +1,28 @@
+# dsh-browser-mcp —— bundle layer
+#
+# Registers ywleeo/browser-mcp (a local MCP server that drives a real Chrome to
+# search and capture any logged-in site — Zhihu, Xiaohongshu, X, Douyin,
+# Bilibili, Reddit, plus Google/Bing/Sogou — and automate a background browser)
+# with dsh's built-in @deepseek-ai/dsh-mcp-client. After install and a restart
+# of `dsh web`, the tools appear as native mcp__browser__<tool> entries.
+#
+# Runtime: the MCP server is a Python package (ai-browser-mcp, already on PyPI).
+# It is launched via `uvx`, which fetches the pinned package on first run — no
+# extra npm wrapper, machine-agnostic as long as `uv` is on PATH. `ai-browser-mcp`
+# exposes the console script `browser-mcp`; `serve` runs the stdio server.
+#
+# Docs: https://github.com/ywleeo/browser-mcp
+
+- insert:
+    - id: mcp-browser
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: browser
+        transport: stdio
+        command: uvx
+        args:
+          - --from
+          - ai-browser-mcp
+          - browser-mcp
+          - serve
+        failOnStartupError: false

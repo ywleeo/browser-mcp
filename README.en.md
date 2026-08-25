@@ -173,6 +173,21 @@ Add this to your Claude Desktop config file:
 
 Save and restart Claude Desktop.
 
+**DeepSeek Harness (dsh)**
+
+Register the server as native dsh MCP tools with one command:
+
+```bash
+dsh plugin --profile web add "github:ywleeo/browser-mcp#main"
+```
+
+Restart `dsh web`. The tools appear as `mcp__browser__*` (for example
+`mcp__browser__browser_read`, `mcp__browser__browser_snapshot`). This is a
+configuration-only dsh bundle: it wires `@deepseek-ai/dsh-mcp-client` to the
+server, and the server itself is fetched from PyPI (`ai-browser-mcp`) via `uvx`,
+so `uv` must be on `PATH` but no local checkout is required. Remove it with
+`dsh plugin --profile web remove "@ywleeo/dsh-browser-mcp"`.
+
 ### 5. Start using it
 
 Once connected, just describe what you want in plain language:

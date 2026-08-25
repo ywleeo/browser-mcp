@@ -163,6 +163,20 @@ args = [
 
 保存配置后重启 Claude Desktop。
 
+**DeepSeek Harness (dsh)**
+
+一条命令即可把该服务注册为 dsh 原生 MCP 工具：
+
+```bash
+dsh plugin --profile web add "github:ywleeo/browser-mcp#main"
+```
+
+重启 `dsh web` 后，工具以 `mcp__browser__*` 形式出现（如
+`mcp__browser__browser_read`、`mcp__browser__browser_snapshot`）。
+这是一个"仅配置"的 dsh bundle：它把 `@deepseek-ai/dsh-mcp-client` 接到该服务，
+而服务本身由 `uvx` 从 PyPI（`ai-browser-mcp`）拉起，所以只要 `PATH` 里有 `uv`
+即可，无需本地 checkout。卸载用 `dsh plugin --profile web remove "@ywleeo/dsh-browser-mcp"`。
+
 ### 5. 直接开用
 
 连接成功后，直接用自然语言告诉你的 AI 助手，例如：
