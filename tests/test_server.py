@@ -34,6 +34,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "browser_read_page",
         "browser_snapshot",
         "browser_click",
+        "browser_dialog",
         "browser_scroll",
         "browser_type",
         "browser_press",
@@ -73,6 +74,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     snapshot_annotations = annotations["browser_snapshot"]
     scroll_annotations = annotations["browser_scroll"]
     click_annotations = annotations["browser_click"]
+    dialog_annotations = annotations["browser_dialog"]
     type_annotations = annotations["browser_type"]
     press_annotations = annotations["browser_press"]
     xhs_download_annotations = annotations["xhs_download"]
@@ -84,6 +86,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
     assert scroll_annotations is not None and scroll_annotations.read_only_hint is True
     assert click_annotations is not None and click_annotations.read_only_hint is False
     assert click_annotations.destructive_hint is True
+    assert dialog_annotations is not None and dialog_annotations.destructive_hint is True
     assert type_annotations is not None and type_annotations.read_only_hint is False
     assert press_annotations is not None and press_annotations.destructive_hint is True
     assert xhs_download_annotations is not None

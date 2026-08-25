@@ -17,6 +17,8 @@ from browser_mcp.config import AppSettings
 from browser_mcp.models import (
     BrowserClickCoordinateSpace,
     BrowserClickRequest,
+    BrowserDialogAction,
+    BrowserDialogRequest,
     BrowserPressKey,
     BrowserPressRequest,
     BrowserReadRequest,
@@ -155,6 +157,9 @@ def create_server(
             "interaction, call browser_snapshot first, choose x/y from its screenshot, and "
             "use the screenshot returned after each action to verify "
             "the result. Element references expire whenever a new page state is returned. "
+            "When a result contains dialog metadata, call browser_dialog before another page "
+            "action. If a stale action is skipped and refreshed, retry only with coordinates or "
+            "references from that fresh result. "
             "Ask for explicit user confirmation immediately before actions that publish, "
             "send, purchase, delete, or otherwise cause consequential external side effects. "
             "Use the "
@@ -225,6 +230,19 @@ def create_server(
             wait_ms=wait_ms,
         )
         return _visual_tool_result(await browser_service.click(request))
+
+    async def _browser_dialog(
+        action: BrowserDialogAction,
+        prompt_text: str | None = None,
+        wait_ms: int = 500,
+    ) -> CallToolResult:
+        """Handle the current Chrome-native alert, confirm, prompt, or beforeunload dialog."""
+        request = BrowserDialogRequest(
+            action=action,
+            prompt_text=prompt_text,
+            wait_ms=wait_ms,
+        )
+        return _visual_tool_result(await browser_service.handle_dialog(request))
 
     async def _browser_scroll(
         direction: BrowserScrollDirection = BrowserScrollDirection.DOWN,
@@ -595,6 +613,23 @@ def create_server(
             "coordinate_space=viewport only for CSS viewport coordinates. The click path "
             "does not traverse DOM or frames and only samples the first topmost hover node. "
             "An element_id is accepted only as shorthand for its saved screenshot center."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+    )
+    server.add_tool(
+        _browser_dialog,
+        name="browser_dialog",
+        description=(
+            "Accept or dismiss the currently open Chrome-native alert, confirm, prompt, or "
+            "beforeunload dialog, then return a full fresh screenshot and element map. For a "
+            "beforeunload dialog, accept means leave the page and dismiss means stay. Use "
+            "prompt_text only when accepting a prompt. If no dialog remains (for example after "
+            "the user pressed Escape), this safely refreshes the visual state."
         ),
         annotations=ToolAnnotations(
             read_only_hint=False,

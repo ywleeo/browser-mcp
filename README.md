@@ -296,6 +296,7 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 | `browser_read_page` | 通用网页 | 当网页内容较长时继续读取后续内容，并保持与首次读取相同的页面快照。 |
 | `browser_snapshot` | 网页操作 | 在共享当前登录态的后台 Chrome 窗口中打开网页，不切走用户当前页面；向 Agent 返回当前视口截图、可见文字以及带编号的按钮、链接、输入框等可操作元素。未提供网址时，可以观察当前页面。 |
 | `browser_click` | 网页操作 | 直接按当前截图中的像素坐标移动可信鼠标并点击；点击链路不遍历 DOM 或 iframe，最多读取坐标下最上层的第一个 hover 节点。`element_id` 仅作为已保存截图中心点的简写。截图坐标会按实际位图尺寸映射到 CSS 视口，也可显式传入 `coordinate_space=viewport`。操作后只返回新截图；继续语义操作前重新调用 `browser_snapshot`。 |
+| `browser_dialog` | 网页操作 | 处理 Chrome 原生 `alert`、`confirm`、`prompt` 和离开页面确认框。`accept` 接受（离开页面），`dismiss` 取消（留在当前页面）；关闭后自动返回全新截图和元素引用。若用户已按 Esc 关闭，调用它会安全刷新页面状态。 |
 | `browser_scroll` | 网页操作 | 向上、向下、向左或向右滚动网页，也可以把指定元素滚动到视口中。 |
 | `browser_type` | 网页操作 | 在输入框或可编辑区域填写、追加或替换文字，并返回填写后的页面状态；密码内容不会出现在元素信息中。 |
 | `browser_press` | 网页操作 | 执行 Enter、Escape、Tab、方向键、翻页键、Home、End 等常用键盘操作。 |

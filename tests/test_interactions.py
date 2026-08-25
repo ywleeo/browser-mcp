@@ -10,6 +10,8 @@ from browser_mcp.config import AppSettings
 from browser_mcp.models import (
     BrowserClickCoordinateSpace,
     BrowserClickRequest,
+    BrowserDialogAction,
+    BrowserDialogRequest,
     BrowserPressKey,
     BrowserPressRequest,
     BrowserScrollDirection,
@@ -56,6 +58,7 @@ async def test_browser_service_dispatches_every_visual_action_with_typed_argumen
         BrowserSnapshotRequest.model_validate({"url": "https://example.com/form"})
     )
     await service.click(BrowserClickRequest(element_id="e1"))
+    await service.handle_dialog(BrowserDialogRequest(action=BrowserDialogAction.DISMISS))
     await service.scroll(
         BrowserScrollRequest(direction=BrowserScrollDirection.DOWN, amount=480)
     )
@@ -67,11 +70,23 @@ async def test_browser_service_dispatches_every_visual_action_with_typed_argumen
     assert [action for action, _args in bridge.interactions] == [
         "snapshot",
         "click",
+        "dialog",
         "scroll",
         "type",
         "press",
         "select",
     ]
-    assert bridge.interactions[2][1]["direction"] == "down"
+    assert bridge.interactions[3][1]["direction"] == "down"
     assert bridge.interactions[1][1]["coordinate_space"] == "screenshot"
-    assert bridge.interactions[4][1]["key"] == "Enter"
+    assert bridge.interactions[2][1]["action"] == "dismiss"
+    assert bridge.interactions[5][1]["key"] == "Enter"
+
+
+def test_dialog_request_validates_native_decisions() -> None:
+    """Dialog requests should expose only explicit accept or dismiss decisions."""
+    request = BrowserDialogRequest(action=BrowserDialogAction.ACCEPT, prompt_text="value")
+
+    assert request.action is BrowserDialogAction.ACCEPT
+    assert request.prompt_text == "value"
+    with pytest.raises(ValidationError):
+        BrowserDialogRequest.model_validate({"action": "escape"})

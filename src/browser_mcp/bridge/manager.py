@@ -37,7 +37,9 @@ FETCH_TIMEOUT_SECONDS: Final = 65.0
 INTERACTION_TIMEOUT_SECONDS: Final = 65.0
 SHUTDOWN_NOTIFY_TIMEOUT_SECONDS: Final = 1.0
 MAX_MESSAGE_BYTES: Final = 16 * 1024 * 1024
-INTERACTION_ACTIONS: Final = frozenset({"snapshot", "click", "scroll", "type", "press", "select"})
+INTERACTION_ACTIONS: Final = frozenset(
+    {"snapshot", "click", "dialog", "scroll", "type", "press", "select"}
+)
 
 
 class BridgeRequestError(RuntimeError):

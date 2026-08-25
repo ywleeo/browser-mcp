@@ -10,6 +10,7 @@ from browser_mcp.config import AppSettings
 from browser_mcp.extraction import extract_content
 from browser_mcp.models import (
     BrowserClickRequest,
+    BrowserDialogRequest,
     BrowserFetchPayload,
     BrowserPressRequest,
     BrowserReadRequest,
@@ -143,6 +144,13 @@ class BrowserService:
         """Click one referenced element or visual coordinate and return the new page state."""
         return await self._interact(
             "click",
+            request.model_dump(exclude_none=True, mode="json"),
+        )
+
+    async def handle_dialog(self, request: BrowserDialogRequest) -> BrowserVisualResult:
+        """Accept or dismiss one Chrome-native dialog and return a fresh visual state."""
+        return await self._interact(
+            "dialog",
             request.model_dump(exclude_none=True, mode="json"),
         )
 

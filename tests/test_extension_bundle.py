@@ -63,10 +63,21 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "async function readInteractionHoverNode" in background
     assert "async function captureVisualClickState" in background
     assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.getLayoutMetrics"' in background
-    assert 'if (action !== "click") await removeForeignExtensionFrames(tabId);' in background
+    assert (
+        'if (action !== "click" && action !== "dialog") '
+        "await removeForeignExtensionFrames(tabId);"
+        in background
+    )
     assert "async function focusManagedInteractionWindow" in background
     assert 'chrome.windows.update(managedWindowId, { focused: true })' in background
     assert "async function restoreInteractionWindowFocus" in background
+    assert 'method === "Page.javascriptDialogOpening"' in background
+    assert 'method === "Page.javascriptDialogClosed"' in background
+    assert '"Page.handleJavaScriptDialog"' in background
+    assert "async function executeNativeDialog" in background
+    assert "function interactionDialogVisualState" in background
+    assert "function isStaleInteractionReferenceError" in background
+    assert "click skipped and visual state refreshed" in background
     assert "targets: visual.clickTargets" in background
     assert "elements: visual.state.elements" in background
     assert (

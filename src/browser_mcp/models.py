@@ -141,6 +141,7 @@ class BrowserPageState(BaseModel):
     elements: tuple[BrowserElement, ...] = ()
     visible_text: str = ""
     warnings: tuple[str, ...] = ()
+    dialog: BrowserDialogState | None = None
 
 
 class BrowserVisualResult(BaseModel):
@@ -154,6 +155,38 @@ class BrowserSnapshotRequest(BaseModel):
     """Validated request for opening or observing one interactive browser tab."""
 
     url: HttpUrl | None = None
+    wait_ms: int = Field(default=500, ge=0, le=30_000)
+
+
+class BrowserDialogType(StrEnum):
+    """Native JavaScript dialog types reported by Chrome."""
+
+    ALERT = "alert"
+    CONFIRM = "confirm"
+    PROMPT = "prompt"
+    BEFORE_UNLOAD = "beforeunload"
+
+
+class BrowserDialogState(BaseModel):
+    """One open Chrome-native dialog that blocks page interaction."""
+
+    type: BrowserDialogType
+    message: str = ""
+    default_prompt: str = ""
+
+
+class BrowserDialogAction(StrEnum):
+    """Decisions supported for one Chrome-native dialog."""
+
+    ACCEPT = "accept"
+    DISMISS = "dismiss"
+
+
+class BrowserDialogRequest(BaseModel):
+    """Validated decision for the currently open Chrome-native dialog."""
+
+    action: BrowserDialogAction
+    prompt_text: str | None = Field(default=None, max_length=100_000)
     wait_ms: int = Field(default=500, ge=0, le=30_000)
 
 

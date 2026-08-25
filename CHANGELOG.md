@@ -4,6 +4,17 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `browser_dialog`，通过 CDP 原生处理 `alert`、`confirm`、`prompt` 与 `beforeunload`
+  离开页面确认框；接受或取消后立即返回完整新截图和元素引用。
+
+### 修复
+
+- Chrome 原生 dialog 打开时保留 debugger 会话并暂停普通页面操作；用户手动按 Esc 关闭后会让旧视觉
+  状态失效。后续若 Agent 使用旧元素或旧坐标，操作会被安全跳过并自动返回新截图，不再以
+  `element not found` 错误卡死。
+
 ## [0.12.2] - 2026-08-24
 
 ### 修复

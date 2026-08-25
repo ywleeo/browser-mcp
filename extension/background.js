@@ -322,21 +322,30 @@ function scheduleBrowserInteraction(state, message) {
 }
 
 /** Wait for one tab to reach complete while bounding tracker-heavy pages. */
-async function waitForTabComplete(tabId, timeoutMs = PAGE_LOAD_TIMEOUT_MS) {
+async function waitForTabComplete(tabId, timeoutMs = PAGE_LOAD_TIMEOUT_MS, signal = null) {
   const tab = await chrome.tabs.get(tabId);
-  if (tab.status === "complete") return;
+  if (tab.status === "complete" || signal?.aborted) return;
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const cleanup = () => {
+      clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
       reject(new Error(`tab load timeout after ${timeoutMs}ms`));
     }, timeoutMs);
     const listener = (updatedTabId, changeInfo) => {
       if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(listener);
+      cleanup();
       resolve();
     };
     chrome.tabs.onUpdated.addListener(listener);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -761,7 +770,7 @@ async function dispatchBrowserInteraction(state, message) {
   const session = `${state.port}:${String(message.tab_id || "default")}`;
   const reply = (payload) =>
     sendJson(state, { type: "browser.interact.result", id: message.id, ...payload });
-  if (!["snapshot", "click", "scroll", "type", "press", "select"].includes(action)) {
+  if (!["snapshot", "click", "dialog", "scroll", "type", "press", "select"].includes(action)) {
     reply({ ok: false, error: `unsupported browser interaction action: ${action}` });
     return;
   }
@@ -769,10 +778,35 @@ async function dispatchBrowserInteraction(state, message) {
   let debuggerSession = null;
   let restoreFocusedWindowId = null;
   let stage = "resolve tab";
+  const replyOpenDialog = async (tabId, screenshotState, dialog) => {
+    const visual = interactionDialogVisualState(
+      await chrome.tabs.get(tabId),
+      screenshotState,
+      dialog,
+    );
+    await restoreInteractionWindowFocus(restoreFocusedWindowId);
+    restoreFocusedWindowId = null;
+    // The session stored in interactionDebuggers must stay attached until the dialog closes.
+    debuggerSession = null;
+    reply({
+      ok: true,
+      data: { state: visual.state, screenshot_data: visual.screenshot_data },
+    });
+  };
   try {
     const tab = await interactionTab(state, message.tab_id, action, args.url);
     const tabId = tab.id;
     if (tabId == null) throw new Error("interactive Chrome tab has no id");
+    const pendingDebugger = interactionDebuggers.get(session) || null;
+    if (pendingDebugger?.dialog && action !== "dialog") {
+      stage = "report pending native dialog";
+      await replyOpenDialog(
+        tabId,
+        lastInteractionScreenshots.get(session) || null,
+        pendingDebugger.dialog,
+      );
+      return;
+    }
     const currentUrl = String(tab.url || "");
     if (
       currentUrl
@@ -787,13 +821,24 @@ async function dispatchBrowserInteraction(state, message) {
     // Coordinate clicks are deliberately frame-agnostic: the screenshot point is the
     // authority, so clicking must not inspect or mutate iframe DOM. Other semantic actions
     // still remove only inaccessible extension-owned frames before their targeted scripts.
-    if (action !== "click") await removeForeignExtensionFrames(tabId);
+    if (action !== "click" && action !== "dialog") await removeForeignExtensionFrames(tabId);
 
     const screenshotState = lastInteractionScreenshots.get(session) || null;
-    const clickPoint = action === "click"
-      ? interactionClickPoint(args, screenshotState)
-      : null;
-    const navigationTarget = action === "click"
+    let refreshReason = null;
+    let clickPoint = null;
+    if (action === "click") {
+      try {
+        clickPoint = interactionClickPoint(args, screenshotState);
+      } catch (error) {
+        if (!isStaleInteractionReferenceError(error)) throw error;
+        refreshReason = `${error?.message || error}; click skipped and visual state refreshed`;
+        console.debug("[browser-mcp-extension] stale click state detected; refreshing", {
+          session,
+          reason: String(error?.message || error),
+        });
+      }
+    }
+    const navigationTarget = action === "click" || action === "dialog"
       ? null
       : await interactionNavigationTarget(tabId, action, args, clickPoint);
     if (navigationTarget) {
@@ -809,24 +854,67 @@ async function dispatchBrowserInteraction(state, message) {
     debuggerSession = await interactionDebuggerSession(state, session, tabId);
     debuggerSession.policyFailure = null;
 
-    if (action === "click") {
+    if (action === "click" || action === "dialog") {
       stage = "focus managed interaction window";
       restoreFocusedWindowId = await focusManagedInteractionWindow(session, tab);
     }
 
-    stage = "execute action";
-    await executeInteractionAction(
-      tabId,
-      action,
-      args,
-      debuggerSession?.target || null,
-      clickPoint,
-    );
-    stage = "wait for page";
-    await settleInteractionTab(tabId, boundedWait(args.wait_ms, action === "snapshot" ? 500 : 300));
+    if (action === "dialog") {
+      stage = "handle native dialog";
+      const handled = await executeNativeDialog(debuggerSession, args);
+      if (!handled) {
+        refreshReason = "No Chrome-native dialog is open; visual state refreshed";
+      }
+    } else if (!refreshReason) {
+      stage = "execute action";
+      try {
+        await executeInteractionAction(
+          tabId,
+          action,
+          args,
+          debuggerSession?.target || null,
+          clickPoint,
+        );
+      } catch (error) {
+        if (!debuggerSession?.dialog) {
+          if (!isStaleInteractionReferenceError(error)) throw error;
+          refreshReason = `${error?.message || error}; action skipped and visual state refreshed`;
+          console.debug("[browser-mcp-extension] stale action state detected; refreshing", {
+            session,
+            action,
+            reason: String(error?.message || error),
+          });
+        }
+      }
+    }
+    if (!refreshReason) {
+      stage = "wait for page";
+      const settleResult = await settleInteractionTabOrDialog(
+        tabId,
+        boundedWait(args.wait_ms, action === "snapshot" ? 500 : 300),
+        debuggerSession,
+      );
+      if (settleResult === "dialog" && debuggerSession.dialog) {
+        await replyOpenDialog(
+          tabId,
+          screenshotState,
+          debuggerSession.dialog,
+        );
+        return;
+      }
+    }
     if (debuggerSession) await Promise.all([...debuggerSession.guardTasks]);
     if (debuggerSession?.policyFailure) {
       throw new Error(`navigation blocked: ${debuggerSession.policyFailure}`);
+    }
+    if (debuggerSession?.dialog) {
+      stage = "report native dialog";
+      await replyOpenDialog(
+        tabId,
+        screenshotState,
+        debuggerSession.dialog,
+      );
+      return;
     }
 
     stage = "validate resulting page";
@@ -841,11 +929,15 @@ async function dispatchBrowserInteraction(state, message) {
     try {
       screenshot = await captureInteractionScreenshot(debuggerSession?.target || null);
     } catch (error) {
+      if (debuggerSession?.dialog) {
+        await replyOpenDialog(tabId, screenshotState, debuggerSession.dialog);
+        return;
+      }
       throw new Error(`screenshot capture: ${error?.message || error}`);
     }
     let visual;
     try {
-      visual = action === "click"
+      visual = action === "click" && !refreshReason
         ? await captureVisualClickState(
           tabId,
           screenshot,
@@ -857,7 +949,15 @@ async function dispatchBrowserInteraction(state, message) {
           screenshot,
           debuggerSession?.target || null,
         );
+      if (refreshReason) {
+        visual.state.action = action;
+        visual.state.warnings = [refreshReason, ...(visual.state.warnings || [])];
+      }
     } catch (error) {
+      if (debuggerSession?.dialog) {
+        await replyOpenDialog(tabId, screenshotState, debuggerSession.dialog);
+        return;
+      }
       throw new Error(`page-state capture: ${error?.message || error}`);
     }
     if (debuggerSession) {
@@ -873,6 +973,8 @@ async function dispatchBrowserInteraction(state, message) {
       viewportHeight: visual.state.viewport.height,
       elements: visual.state.elements,
       targets: visual.clickTargets,
+      screenshotData: screenshot.data,
+      state: visual.state,
     });
     reply({
       ok: true,
@@ -941,6 +1043,9 @@ function interactionClickPoint(args, screenshotState) {
     throw new Error("browser_click requires finite x and y coordinates");
   }
   const coordinateSpace = String(args.coordinate_space || "screenshot");
+  if (!screenshotState) {
+    throw new Error("click coordinates require a fresh browser_snapshot");
+  }
   if (coordinateSpace === "viewport") return { x, y };
   if (coordinateSpace !== "screenshot") {
     throw new Error(`unsupported click coordinate space: ${coordinateSpace}`);
@@ -969,6 +1074,15 @@ function interactionClickPoint(args, screenshotState) {
     x: x / scaleX,
     y: y / scaleY,
   };
+}
+
+/** Return whether one failed action is safe to replace with a fresh visual snapshot. */
+function isStaleInteractionReferenceError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return message.includes("require a fresh browser_snapshot")
+    || message.includes("requires a fresh browser_snapshot")
+    || message.includes("element reference is stale")
+    || message.includes("element not found");
 }
 
 /** Return the explicit anchor or form destination associated with one interaction. */
@@ -1014,13 +1128,42 @@ async function interactionDebuggerSession(state, session, tabId) {
   if (existing) await closeInteractionDebugger(session);
   const target = await attachInteractionDebugger(tabId);
   const debuggerSession = {
+    session,
     target,
     guardTasks: new Set(),
     policyFailure: null,
+    dialog: null,
+    dialogOpened: null,
+    resolveDialogOpened: null,
     listener: null,
   };
+  resetInteractionDialogSignal(debuggerSession);
   debuggerSession.listener = (source, method, params) => {
-    if (!source || source.tabId !== tabId || method !== "Fetch.requestPaused") return;
+    if (!source || source.tabId !== tabId) return;
+    if (method === "Page.javascriptDialogOpening") {
+      debuggerSession.dialog = {
+        type: String(params?.type || "alert"),
+        message: String(params?.message || "").slice(0, 10_000),
+        default_prompt: String(params?.defaultPrompt || "").slice(0, 10_000),
+      };
+      console.debug("[browser-mcp-extension] native dialog opened", {
+        session,
+        type: debuggerSession.dialog.type,
+      });
+      debuggerSession.resolveDialogOpened?.("dialog");
+      return;
+    }
+    if (method === "Page.javascriptDialogClosed") {
+      console.debug("[browser-mcp-extension] native dialog closed; visual state invalidated", {
+        session,
+        accepted: Boolean(params?.result),
+      });
+      debuggerSession.dialog = null;
+      lastInteractionScreenshots.delete(session);
+      resetInteractionDialogSignal(debuggerSession);
+      return;
+    }
+    if (method !== "Fetch.requestPaused") return;
     const task = (async () => {
       const approval = await requestUrlApproval(state, params.request?.url || "");
       if (approval.allowed) {
@@ -1043,6 +1186,55 @@ async function interactionDebuggerSession(state, session, tabId) {
   chrome.debugger.onEvent.addListener(debuggerSession.listener);
   interactionDebuggers.set(session, debuggerSession);
   return debuggerSession;
+}
+
+/** Reset the one-shot signal used to interrupt page settling when a dialog opens. */
+function resetInteractionDialogSignal(debuggerSession) {
+  debuggerSession.dialogOpened = new Promise((resolve) => {
+    debuggerSession.resolveDialogOpened = resolve;
+  });
+}
+
+/** Accept or dismiss the currently open Chrome-native dialog exactly once. */
+async function executeNativeDialog(debuggerSession, args) {
+  if (!debuggerSession?.dialog) return false;
+  const action = String(args.action || "");
+  if (!["accept", "dismiss"].includes(action)) {
+    throw new Error(`unsupported native dialog action: ${action}`);
+  }
+  const parameters = { accept: action === "accept" };
+  if (action === "accept" && typeof args.prompt_text === "string") {
+    parameters.promptText = args.prompt_text;
+  }
+  await chrome.debugger.sendCommand(
+    debuggerSession.target,
+    "Page.handleJavaScriptDialog",
+    parameters,
+  );
+  debuggerSession.dialog = null;
+  lastInteractionScreenshots.delete(debuggerSession.session);
+  resetInteractionDialogSignal(debuggerSession);
+  return true;
+}
+
+/** Return the last page surface plus metadata for one blocking browser-native dialog. */
+function interactionDialogVisualState(tab, screenshotState, dialog) {
+  if (!screenshotState?.screenshotData || !screenshotState?.state) {
+    throw new Error(
+      "Chrome-native dialog opened before a visual state was saved; use browser_dialog to handle it",
+    );
+  }
+  const state = structuredClone(screenshotState.state);
+  state.action = "dialog";
+  state.url = String(tab.url || state.url || "");
+  state.title = String(tab.title || state.title || "");
+  state.elements = [];
+  state.dialog = dialog;
+  state.warnings = [
+    "Chrome-native dialog blocks page input; use browser_dialog before another page action.",
+    ...(state.warnings || []),
+  ];
+  return { state, screenshot_data: screenshotState.screenshotData };
 }
 
 /** Release one persistent interaction debugger and its navigation listener. */
@@ -1557,13 +1749,37 @@ async function executeSelect(tabId, elementId, requestedValue) {
 }
 
 /** Wait for top-level navigation when present, then allow bounded SPA rendering time. */
-async function settleInteractionTab(tabId, waitMs) {
+async function settleInteractionTab(tabId, waitMs, signal = null) {
   try {
-    await waitForTabComplete(tabId);
+    await waitForTabComplete(tabId, PAGE_LOAD_TIMEOUT_MS, signal);
   } catch (error) {
     if (!String(error?.message || error).includes("tab load timeout")) throw error;
   }
-  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  if (waitMs > 0 && !signal?.aborted) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, waitMs);
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+  }
+}
+
+/** Settle page rendering unless a Chrome-native dialog starts blocking the tab. */
+async function settleInteractionTabOrDialog(tabId, waitMs, debuggerSession) {
+  if (debuggerSession?.dialog) return "dialog";
+  if (!debuggerSession?.dialogOpened) {
+    await settleInteractionTab(tabId, waitMs);
+    return "settled";
+  }
+  const controller = new AbortController();
+  const result = await Promise.race([
+    settleInteractionTab(tabId, waitMs, controller.signal).then(() => "settled"),
+    debuggerSession.dialogOpened,
+  ]);
+  if (result === "dialog") controller.abort();
+  return result;
 }
 
 /** Clamp agent-controlled rendering waits to the documented interaction limit. */
