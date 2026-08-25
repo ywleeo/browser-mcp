@@ -1,6 +1,7 @@
 # Browser MCP
 
 [![M8ven Verified](https://m8ven.ai/badge/mcp/ywleeo-browser-mcp-1fpz06)](https://m8ven.ai/mcp/ywleeo-browser-mcp-1fpz06)
+[![PyPI version](https://img.shields.io/pypi/v/ai-browser-mcp)](https://pypi.org/project/ai-browser-mcp/) [![Python](https://img.shields.io/pypi/pyversions/ai-browser-mcp)](https://pypi.org/project/ai-browser-mcp/) [![Downloads](https://img.shields.io/pypi/dm/ai-browser-mcp)](https://pypi.org/project/ai-browser-mcp/)
 
 [English](README.en.md) · [中文](README.md)
 
