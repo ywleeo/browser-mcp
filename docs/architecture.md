@@ -260,7 +260,7 @@ browser-mcp/
 │   ├── douyin_content_inject.js
 │   ├── douyin_content_bridge.js
 │   ├── comment_sessions.js     # 可续抓评论采集会话的生命周期与持久化
-│   ├── background_tabs.js      # 共享的最小化读取窗口，隔离调试横幅与后台标签页
+│   ├── background_tabs.js      # 只读标签页的唯一入口，负责登记与断线回收
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化
@@ -339,16 +339,22 @@ FFmpeg 合并位于独立 `BilibiliMediaDownloader`，不会改变小红书或�
 可信点击，不理解任何平台 selector。小红书的 `#like/#liked`、`#collect/#collected` 与抖音的
 `data-e2e-state` 判定全部留在各自扩展 adapter 中。
 
-### 6.1 读取标签页的窗口隔离
+### 6.1 读取标签页与调试横幅
 
-`browser.fetch` 必须 attach `chrome.debugger` 才能在每一跳导航提交前做 URL 策略校验，而 Chrome
-会在**被附加标签页所在的窗口**顶部强制显示调试横幅，扩展无法关闭——这是 Chrome 的反滥用设计，
-不是可配置项。校验本身也不能省：去掉它等于放弃对重定向的 SSRF 防护。
+Chrome 的调试横幅由 Chromium 的 `GlobalConfirmInfoBar` 绘制：只要有扩展持有 `chrome.debugger`
+attach，profile 内每个窗口的每个标签页都会显示它，与被附加标签页在哪个窗口无关。扩展无法关闭它，
+唯一不显示的办法就是不 attach（用户侧另有 `--silent-debugger-extension-api` 启动参数，但那会对
+所有扩展全局关闭这条提示）。
 
-因此隔离的是窗口而不是能力：所有只读适配器的标签页都由 `extension/background_tabs.js` 建在一个
-共享的、最小化的后台窗口里，用户当前窗口既不会被横幅顶开，也不会被塞进后台标签页。该窗口按需
-创建、跨调用复用、空闲两分钟后由 alarm 关闭，并镜像到 `chrome.storage.session`，使 service
-worker 被回收后能重新接管而不是每次泄漏一个窗口；创建失败时回退到当前窗口，读取能力不受影响。
+0.13.0 曾把只读标签页搬进一个独立的最小化窗口，试图让横幅离开用户正在用的窗口——这个方向不成立，
+横幅本来就画在所有窗口上。0.13.1 改为对症下药：`browser.fetch` 只在 `extract="xhr"` 时 attach
+（`Network.getResponseBody` 没有扩展 API 替代品），其余读取模式直接导航目标 URL，全程不碰
+debugger，横幅随之消失。横幅一走，读取标签页也就没有理由再单独占一个窗口，回到用户当前窗口以
+`active: false` 打开、用完即关。`extension/background_tabs.js` 保留为只读标签页的唯一入口，只做
+一件事：登记本进程创建的标签页，bridge 断开时把 service worker 被回收后残留的标签页关掉。
+
+需要可信输入事件的视觉交互、评论采集与点赞收藏仍然 attach，横幅会出现：那些路径本来就要弹出可见
+窗口，用户知道 agent 正在操作页面。
 
 需要截图的视觉交互窗口不走这条路径：它必须可见才能捕获画面，仍使用自己的独立非聚焦窗口。
 
@@ -426,7 +432,11 @@ MCP client -> stdio -> Python MCP -> local WS -> extension -> Chrome -> capture
 - localhost、`.local` 和明确的内网 hostname。
 - loopback、private、link-local、multicast、unspecified IP。
 - DNS 解析到非公网 IP。
-- 任一重定向跳转到非公网地址。
+
+校验发生在导航前：每个适配器（含 `browser.fetch`）在打开标签页之前把目标 URL 回问 Python 策略，
+不通过就不开标签页。Chrome 导航之后的重定向不再逐跳校验——逐跳校验只能靠 `Fetch.requestPaused`，
+代价是每次读取都 attach `chrome.debugger`，让全局调试横幅常驻用户的所有窗口（见 6.1）。走 Python
+httpx 的媒体下载不受影响，仍然逐跳校验重定向。
 
 这是独立 MCP 后必须加强的边界：客户端模型提供的 URL 不能借 Chrome 访问本机管理面板或云 metadata endpoint。
 

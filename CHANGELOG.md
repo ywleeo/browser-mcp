@@ -2,6 +2,30 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.13.1] - 2026-08-31
+
+### 修复
+
+- 普通网页读取不再 attach `chrome.debugger`，Chrome 的调试横幅随之消失。0.13.0 判断错了这个横幅
+  的作用域：它由 Chromium 的 `GlobalConfirmInfoBar` 绘制，只要有扩展 attach 了 debugger，profile
+  内**所有**窗口的所有标签页都会显示，把读取标签页挪进独立后台窗口不可能让它消失。现在
+  `browser.fetch` 只在 `extract="xhr"` 时 attach（`Network.getResponseBody` 没有扩展 API 替代品），
+  其余模式直接导航目标 URL，并省掉一次 `about:blank` 中转。视觉交互、评论采集与点赞收藏依赖可信
+  输入事件，仍然 attach。
+
+### 变更
+
+- 读取路径不再逐跳校验重定向。目标 URL 在打开标签页前仍走 Python `PublicUrlPolicy`（scheme、内网
+  hostname、非公网 IP、DNS 解析结果），但 Chrome 自行跟随的重定向不再回问策略：逐跳校验只能靠
+  `Fetch.requestPaused`，而它正是横幅的来源。走 Python httpx 的媒体下载不受影响，仍逐跳校验。
+
+### 移除
+
+- 0.13.0 引入的共享最小化后台窗口移除，只读标签页回到用户当前窗口，以 `active: false` 打开、用完
+  即关。它当初是为了隔离横幅而建，而横幅根本不受窗口影响；横幅已由上一条修复，多出来的那个窗口只
+  剩碍事。`extension/background_tabs.js` 保留为只读标签页的唯一入口，负责登记标签页并在 bridge
+  断开时回收 service worker 被回收后残留的标签页。
+
 ## [0.13.0] - 2026-08-31
 
 ### 新增

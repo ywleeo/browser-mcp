@@ -5,12 +5,10 @@
 
 import { BUNDLE_BUILD_ID } from "./build-info.js";
 import {
+  closeAllBackgroundTabs,
   closeBackgroundTab,
-  closeBackgroundWindow,
   forgetBackgroundTab,
-  forgetBackgroundWindow,
   openBackgroundTab,
-  sweepBackgroundWindow,
 } from "./background_tabs.js";
 import {
   SWEEP_ALARM_NAME,
@@ -298,7 +296,7 @@ function connectPort(port, config) {
     } else if (message.type === "bridge.shutdown") {
       void cleanupBridgeSessionsForPort(port);
       void closeAllCommentSessions();
-      void closeBackgroundWindow();
+      void closeAllBackgroundTabs();
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -387,57 +385,47 @@ async function dispatchBrowserFetch(state, message) {
   let tabId = null;
   let debuggerTarget = null;
   let debuggerListener = null;
-  const guardTasks = new Set();
-  let policyFailure = null;
   try {
-    const tab = await openBackgroundTab({ url: "about:blank" });
+    const approval = await requestUrlApproval(state, url);
+    if (!approval.allowed) {
+      throw new Error(approval.error || "navigation blocked by URL policy");
+    }
+
+    // Only `xhr` needs chrome.debugger — Network.getResponseBody has no extension-API
+    // equivalent — and it must be attached before the target URL is requested, so that mode
+    // alone pays for a blank tab plus a second navigation. Every other read navigates
+    // directly: attaching would raise Chrome's debugging infobar, and that infobar is global.
+    // It is drawn in every window of the profile, so no amount of window isolation hides it
+    // from the user's own tabs; the only way not to show it is not to attach.
+    const capturesXhr = extract === "xhr";
+    const tab = await openBackgroundTab({ url: capturesXhr ? "about:blank" : url });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a fetch tab");
-    debuggerTarget = { tabId };
-    await chrome.debugger.attach(debuggerTarget, "1.3");
-    await chrome.debugger.sendCommand(debuggerTarget, "Network.enable", {});
-    await chrome.debugger.sendCommand(debuggerTarget, "Fetch.enable", {
-      patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
-    });
 
     const requests = new Map();
     const responses = new Map();
-    debuggerListener = (source, method, params) => {
-      if (!source || source.tabId !== tabId) return;
-      if (method === "Fetch.requestPaused") {
-        const task = (async () => {
-          const approval = await requestUrlApproval(state, params.request?.url || "");
-          if (approval.allowed) {
-            await chrome.debugger.sendCommand(debuggerTarget, "Fetch.continueRequest", {
-              requestId: params.requestId,
-            });
-          } else {
-            policyFailure = approval.error || "navigation blocked by URL policy";
-            await chrome.debugger.sendCommand(debuggerTarget, "Fetch.failRequest", {
-              requestId: params.requestId,
-              errorReason: "BlockedByClient",
-            });
-          }
-        })().catch((error) => {
-          policyFailure = `URL guard failed: ${error?.message || error}`;
-        });
-        guardTasks.add(task);
-        void task.finally(() => guardTasks.delete(task));
-      } else if (method === "Network.requestWillBeSent") {
-        requests.set(params.requestId, {
-          url: params.request?.url || "",
-          method: params.request?.method || "GET",
-        });
-      } else if (method === "Network.responseReceived") {
-        responses.set(params.requestId, {
-          status: params.response?.status || 0,
-          mime: params.response?.mimeType || "",
-          type: params.type || "",
-        });
-      }
-    };
-    chrome.debugger.onEvent.addListener(debuggerListener);
-    await chrome.tabs.update(tabId, { url });
+    if (capturesXhr) {
+      debuggerTarget = { tabId };
+      await chrome.debugger.attach(debuggerTarget, "1.3");
+      await chrome.debugger.sendCommand(debuggerTarget, "Network.enable", {});
+      debuggerListener = (source, method, params) => {
+        if (!source || source.tabId !== tabId) return;
+        if (method === "Network.requestWillBeSent") {
+          requests.set(params.requestId, {
+            url: params.request?.url || "",
+            method: params.request?.method || "GET",
+          });
+        } else if (method === "Network.responseReceived") {
+          responses.set(params.requestId, {
+            status: params.response?.status || 0,
+            mime: params.response?.mimeType || "",
+            type: params.type || "",
+          });
+        }
+      };
+      chrome.debugger.onEvent.addListener(debuggerListener);
+      await chrome.tabs.update(tabId, { url });
+    }
 
     let loadTimedOut = false;
     try {
@@ -446,8 +434,6 @@ async function dispatchBrowserFetch(state, message) {
       if (!String(error?.message || error).includes("tab load timeout")) throw error;
       loadTimedOut = true;
     }
-    await Promise.all([...guardTasks]);
-    if (policyFailure) throw new Error(`navigation blocked: ${policyFailure}`);
     if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
 
     const htmlLimit = extract === "readability" || extract === "raw"
@@ -3973,10 +3959,7 @@ chrome.alarms.create("browser-mcp-keepalive", { periodInMinutes: 1 });
 chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "browser-mcp-keepalive") connectAll();
-  else if (alarm.name === SWEEP_ALARM_NAME) {
-    void sweepCommentSessions();
-    void sweepBackgroundWindow();
-  }
+  else if (alarm.name === SWEEP_ALARM_NAME) void sweepCommentSessions();
 });
 chrome.runtime.onInstalled.addListener(connectAll);
 chrome.runtime.onStartup.addListener(connectAll);
@@ -3998,8 +3981,5 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     lastInteractionScreenshots.delete(session);
     void closeInteractionDebugger(session);
   }
-});
-chrome.windows.onRemoved.addListener((windowId) => {
-  void forgetBackgroundWindow(windowId);
 });
 void connectAll();

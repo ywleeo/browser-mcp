@@ -111,13 +111,18 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     sessions = (first.directory / "comment_sessions.js").read_text(encoding="utf-8")
     assert "export function findCommentSession" in sessions
     assert "export async function suspendCommentSession" in sessions
-    # Read tabs must never be created in whatever window the user is currently using: that is
-    # what put Chrome's debugger banner on top of their work.
+    # Read tabs go through one entry point so a bridge disconnect can close what an evicted
+    # service worker left behind, instead of leaking read tabs into the user's tab strip.
     assert "chrome.tabs.create" not in background
     assert "openBackgroundTab(" in background
-    read_window = (first.directory / "background_tabs.js").read_text(encoding="utf-8")
-    assert 'state: "minimized"' in read_window
-    assert "export async function openBackgroundTab" in read_window
+    read_tabs = (first.directory / "background_tabs.js").read_text(encoding="utf-8")
+    assert "export async function openBackgroundTab" in read_tabs
+    assert "export async function closeAllBackgroundTabs" in read_tabs
+    assert "chrome.windows.create" not in read_tabs
+    # Chrome paints its debugging infobar in every window of the profile for as long as any
+    # attachment is held, so ordinary reads must never attach: only the xhr capture may.
+    assert 'const capturesXhr = extract === "xhr";' in background
+    assert 'openBackgroundTab({ url: capturesXhr ? "about:blank" : url })' in background
     assert "if (ui.clicked === 0)" in background
     assert "scroller.scrollTop = scroller.scrollHeight" not in background
     assert "function readXhsNoteRuntimeState" in background
