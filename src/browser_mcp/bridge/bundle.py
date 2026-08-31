@@ -119,6 +119,7 @@ class ExtensionBundle:
             source_dir = project_root / "extension"
             source_names = (
                 "background.js",
+                "background_tabs.js",
                 "comment_sessions.js",
                 "content_bridge.js",
                 "content_inject.js",

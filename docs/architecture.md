@@ -260,6 +260,7 @@ browser-mcp/
 │   ├── douyin_content_inject.js
 │   ├── douyin_content_bridge.js
 │   ├── comment_sessions.js     # 可续抓评论采集会话的生命周期与持久化
+│   ├── background_tabs.js      # 共享的最小化读取窗口，隔离调试横幅与后台标签页
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化
@@ -338,7 +339,20 @@ FFmpeg 合并位于独立 `BilibiliMediaDownloader`，不会改变小红书或�
 可信点击，不理解任何平台 selector。小红书的 `#like/#liked`、`#collect/#collected` 与抖音的
 `data-e2e-state` 判定全部留在各自扩展 adapter 中。
 
-### 6.1 评论采集的时间预算与续抓
+### 6.1 读取标签页的窗口隔离
+
+`browser.fetch` 必须 attach `chrome.debugger` 才能在每一跳导航提交前做 URL 策略校验，而 Chrome
+会在**被附加标签页所在的窗口**顶部强制显示调试横幅，扩展无法关闭——这是 Chrome 的反滥用设计，
+不是可配置项。校验本身也不能省：去掉它等于放弃对重定向的 SSRF 防护。
+
+因此隔离的是窗口而不是能力：所有只读适配器的标签页都由 `extension/background_tabs.js` 建在一个
+共享的、最小化的后台窗口里，用户当前窗口既不会被横幅顶开，也不会被塞进后台标签页。该窗口按需
+创建、跨调用复用、空闲两分钟后由 alarm 关闭，并镜像到 `chrome.storage.session`，使 service
+worker 被回收后能重新接管而不是每次泄漏一个窗口；创建失败时回退到当前窗口，读取能力不受影响。
+
+需要截图的视觉交互窗口不走这条路径：它必须可见才能捕获画面，仍使用自己的独立非聚焦窗口。
+
+### 6.2 评论采集的时间预算与续抓
 
 评论采集是没有可靠上界的滚动循环：热门作品要滚几分钟，长于任何 MCP 客户端的单次调用超时。
 因此单次调用不追求抓完，而是**限时**：`time_budget_seconds` 到点时采集挂起而不是失败，返回
