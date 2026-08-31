@@ -12,7 +12,7 @@ import {
 } from "./background_tabs.js";
 import {
   SWEEP_ALARM_NAME,
-  closeAllCommentSessions,
+  closeCommentSessionsForPort,
   closeCommentSession,
   commentSessionHydration,
   createCommentSession,
@@ -295,7 +295,7 @@ function connectPort(port, config) {
       void dispatchDouyinMutation(state, message);
     } else if (message.type === "bridge.shutdown") {
       void cleanupBridgeSessionsForPort(port);
-      void closeAllCommentSessions();
+      void closeCommentSessionsForPort(port);
       void closeBackgroundTabsForPort(port);
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
@@ -2692,6 +2692,7 @@ async function runXhsComments(state, args, reply) {
       // Own the window through the session from here on, so every later failure closes it once.
       session = await createCommentSession({
         platform: "xhs",
+        port: state.port,
         fingerprint: noteId,
         tabId,
         windowId: createdWindow.id,
@@ -3745,6 +3746,7 @@ async function runDouyinComments(state, args, reply) {
       // Own the window through the session from here on, so every later failure closes it once.
       session = await createCommentSession({
         platform: "douyin",
+        port: state.port,
         fingerprint: awemeId,
         tabId,
         windowId: createdWindow.id,

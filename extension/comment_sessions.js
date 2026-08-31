@@ -12,6 +12,12 @@
 // Suspended sessions are a resource, so they expire. An idle session is closed by the sweep alarm
 // after SESSION_IDLE_TTL_MS, and mirrored into chrome.storage.session so that a service-worker
 // restart can either recover the session or close the window Chrome is still holding open.
+//
+// Each session also records the bridge port that opened it. Several paired processes can drive one
+// Chrome profile at once, and one of them shutting down must not tear down another's suspended
+// collection mid-run. A session recovered from an older storage format carries no port, so no
+// shutdown claims it — it is reclaimed by the idle sweep instead, which is the safe direction to
+// err in.
 
 const SESSION_STATE_KEY = "browserMcpCommentSessions";
 const SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
@@ -50,6 +56,7 @@ async function persistCommentSessions() {
     state[id] = {
       platform: session.platform,
       fingerprint: session.fingerprint,
+      port: session.port ?? null,
       tabId: session.tabId,
       windowId: session.windowId,
       seen: [...session.seen],
@@ -83,6 +90,7 @@ async function hydrateCommentSessions() {
         id,
         platform: String(entry.platform || ""),
         fingerprint: String(entry.fingerprint || ""),
+        port: entry.port ?? null,
         tabId: entry.tabId,
         windowId: entry.windowId ?? null,
         seen: new Set(Array.isArray(entry.seen) ? entry.seen : []),
@@ -118,6 +126,7 @@ export function findCommentSession(sessionId, { platform, fingerprint }) {
 export async function createCommentSession({
   platform,
   fingerprint,
+  port,
   tabId,
   windowId,
   seen,
@@ -131,6 +140,7 @@ export async function createCommentSession({
     id: crypto.randomUUID(),
     platform,
     fingerprint,
+    port: port ?? null,
     tabId,
     windowId: windowId ?? null,
     seen: seen || new Set(),
@@ -175,9 +185,12 @@ export async function sweepCommentSessions() {
   }
 }
 
-/** Drop every session, used when the paired Python process announces shutdown. */
-export async function closeAllCommentSessions() {
-  for (const session of [...commentSessions.values()]) await closeCommentSession(session);
+/** Drop the sessions one bridge port opened, used when that paired process announces shutdown. */
+export async function closeCommentSessionsForPort(port) {
+  for (const session of [...commentSessions.values()]) {
+    if (session.port !== port) continue;
+    await closeCommentSession(session);
+  }
 }
 
 /** Forget one session whose tab Chrome closed underneath us, without touching Chrome again. */

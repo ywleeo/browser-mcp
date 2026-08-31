@@ -111,6 +111,9 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     sessions = (first.directory / "comment_sessions.js").read_text(encoding="utf-8")
     assert "export function findCommentSession" in sessions
     assert "export async function suspendCommentSession" in sessions
+    # A shutting-down client must reclaim only its own suspended collections.
+    assert "export async function closeCommentSessionsForPort" in sessions
+    assert "closeCommentSessionsForPort(port)" in background
     # Read tabs go through one entry point so a bridge disconnect can close what an evicted
     # service worker left behind, instead of leaking read tabs into the user's tab strip.
     assert "chrome.tabs.create" not in background
