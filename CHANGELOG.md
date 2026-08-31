@@ -2,6 +2,15 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.13.2] - 2026-08-31
+
+### 修复
+
+- 一个配对进程退出时不再关闭其他客户端正在进行的读取。多个配对进程可以同时驱动同一个 Chrome
+  profile，而 `bridge.shutdown` 过去会无差别关掉所有登记在案的读取标签页，另一个客户端的在途读取
+  因此报 `No tab with id`。读取标签页现在按 bridge port 记账，退出只回收自己那一份，与
+  `cleanupBridgeSessionsForPort` 的既有做法一致。
+
 ## [0.13.1] - 2026-08-31
 
 ### 修复

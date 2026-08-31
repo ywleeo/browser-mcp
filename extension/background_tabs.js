@@ -9,14 +9,17 @@
 // window to step over.
 //
 // Tabs stay tracked so a bridge disconnect can close whatever an evicted service worker left
-// behind, instead of leaking read tabs into the user's tab strip.
+// behind, instead of leaking read tabs into the user's tab strip. They are tracked per bridge
+// port: several paired processes can drive one Chrome profile at once, and one of them shutting
+// down must not kill another's in-flight read — that surfaces as "No tab with id" on a read that
+// was doing nothing wrong.
 
-const managedTabs = new Set();
+const managedTabs = new Map();
 
-/** Create one inactive read tab in the user's current window. */
-export async function openBackgroundTab(createProperties) {
+/** Create one inactive read tab in the user's current window, owned by one bridge port. */
+export async function openBackgroundTab(createProperties, port) {
   const tab = await chrome.tabs.create({ ...createProperties, active: false });
-  if (tab?.id != null) managedTabs.add(tab.id);
+  if (tab?.id != null) managedTabs.set(tab.id, port ?? null);
   return tab;
 }
 
@@ -32,9 +35,13 @@ export function forgetBackgroundTab(tabId) {
   managedTabs.delete(tabId);
 }
 
-/** Close every read tab still open, used when the paired process goes away. */
-export async function closeAllBackgroundTabs() {
-  const tabIds = [...managedTabs];
-  managedTabs.clear();
+/** Close the read tabs one bridge port opened, leaving every other client's reads alone. */
+export async function closeBackgroundTabsForPort(port) {
+  const tabIds = [];
+  for (const [tabId, owner] of managedTabs) {
+    if (owner !== port) continue;
+    tabIds.push(tabId);
+  }
+  for (const tabId of tabIds) managedTabs.delete(tabId);
   await Promise.all(tabIds.map((tabId) => chrome.tabs.remove(tabId).catch(() => {})));
 }

@@ -5,8 +5,8 @@
 
 import { BUNDLE_BUILD_ID } from "./build-info.js";
 import {
-  closeAllBackgroundTabs,
   closeBackgroundTab,
+  closeBackgroundTabsForPort,
   forgetBackgroundTab,
   openBackgroundTab,
 } from "./background_tabs.js";
@@ -296,7 +296,7 @@ function connectPort(port, config) {
     } else if (message.type === "bridge.shutdown") {
       void cleanupBridgeSessionsForPort(port);
       void closeAllCommentSessions();
-      void closeAllBackgroundTabs();
+      void closeBackgroundTabsForPort(port);
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -398,7 +398,7 @@ async function dispatchBrowserFetch(state, message) {
     // It is drawn in every window of the profile, so no amount of window isolation hides it
     // from the user's own tabs; the only way not to show it is not to attach.
     const capturesXhr = extract === "xhr";
-    const tab = await openBackgroundTab({ url: capturesXhr ? "about:blank" : url });
+    const tab = await openBackgroundTab({ url: capturesXhr ? "about:blank" : url }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a fetch tab");
 
@@ -576,7 +576,7 @@ async function runBilibiliSearch(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: apiTarget.toString() });
+    const tab = await openBackgroundTab({ url: apiTarget.toString() }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Bilibili search tab");
     await waitForTabComplete(tabId);
@@ -704,7 +704,7 @@ async function runBilibiliVideo(state, args, includePlayinfo, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: target.toString() });
+    const tab = await openBackgroundTab({ url: target.toString() }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Bilibili video tab");
     await waitForTabComplete(tabId);
@@ -2106,7 +2106,7 @@ async function runZhihuSearch(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" });
+    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Zhihu search tab");
     await waitForTabComplete(tabId);
@@ -2154,7 +2154,7 @@ async function runZhihuInvitations(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" });
+    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Zhihu invitations tab");
     await waitForTabComplete(tabId);
@@ -2488,7 +2488,7 @@ async function runXhsSearch(state, args, reply) {
   }
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS search tab");
     await waitForTabComplete(tabId);
@@ -2888,7 +2888,7 @@ async function runXhsUserNotes(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS profile tab");
     await waitForTabComplete(tabId);
@@ -3074,7 +3074,7 @@ async function runXhsNote(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS note tab");
     await waitForTabComplete(tabId);
@@ -3342,7 +3342,7 @@ async function runDouyinNoteRead(state, target, awemeId, reply) {
   }
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" });
+    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Douyin note tab");
     await waitForTabComplete(tabId);
@@ -3450,7 +3450,7 @@ async function runDouyinObservedRead(state, target, kind, reply) {
   }
   let tabId = null;
   try {
-    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" });
+    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" }, state.port);
     tabId = tab.id;
     if (tabId == null) throw new Error(`Chrome did not create a Douyin ${kind} tab`);
     await waitForTabComplete(tabId);

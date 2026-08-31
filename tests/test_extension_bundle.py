@@ -117,12 +117,15 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "openBackgroundTab(" in background
     read_tabs = (first.directory / "background_tabs.js").read_text(encoding="utf-8")
     assert "export async function openBackgroundTab" in read_tabs
-    assert "export async function closeAllBackgroundTabs" in read_tabs
+    assert "export async function closeBackgroundTabsForPort" in read_tabs
     assert "chrome.windows.create" not in read_tabs
+    # Several paired processes share one Chrome profile: one shutting down must close only its
+    # own read tabs, never another client's in-flight read.
+    assert "closeBackgroundTabsForPort(port)" in background
     # Chrome paints its debugging infobar in every window of the profile for as long as any
     # attachment is held, so ordinary reads must never attach: only the xhr capture may.
     assert 'const capturesXhr = extract === "xhr";' in background
-    assert 'openBackgroundTab({ url: capturesXhr ? "about:blank" : url })' in background
+    assert 'openBackgroundTab({ url: capturesXhr ? "about:blank" : url }, state.port)' in background
     assert "if (ui.clicked === 0)" in background
     assert "scroller.scrollTop = scroller.scrollHeight" not in background
     assert "function readXhsNoteRuntimeState" in background
