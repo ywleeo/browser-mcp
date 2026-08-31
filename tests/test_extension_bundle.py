@@ -29,6 +29,7 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert (first.directory / "douyin_content_inject.js").is_file()
     assert (first.directory / "douyin_content_bridge.js").is_file()
     assert (first.directory / "comment_sessions.js").is_file()
+    assert (first.directory / "background_tabs.js").is_file()
     assert first.build_id in (first.directory / "build-info.js").read_text(encoding="utf-8")
     assert pairing["base_port"] == 17_880
     assert pairing["pool_size"] == 10
@@ -110,6 +111,13 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     sessions = (first.directory / "comment_sessions.js").read_text(encoding="utf-8")
     assert "export function findCommentSession" in sessions
     assert "export async function suspendCommentSession" in sessions
+    # Read tabs must never be created in whatever window the user is currently using: that is
+    # what put Chrome's debugger banner on top of their work.
+    assert "chrome.tabs.create" not in background
+    assert "openBackgroundTab(" in background
+    read_window = (first.directory / "background_tabs.js").read_text(encoding="utf-8")
+    assert 'state: "minimized"' in read_window
+    assert "export async function openBackgroundTab" in read_window
     assert "if (ui.clicked === 0)" in background
     assert "scroller.scrollTop = scroller.scrollHeight" not in background
     assert "function readXhsNoteRuntimeState" in background

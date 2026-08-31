@@ -9,6 +9,14 @@
 - 新增 `browser_dialog`，通过 CDP 原生处理 `alert`、`confirm`、`prompt` 与 `beforeunload`
   离开页面确认框；接受或取消后立即返回完整新截图和元素引用。
 
+### 改进
+
+- 只读适配器的标签页不再建在用户当前窗口，而是统一放进一个共享的最小化后台窗口
+  （`extension/background_tabs.js`）。`browser.fetch` 为校验每一跳导航必须 attach
+  `chrome.debugger`，Chrome 会在被附加标签页所在窗口顶部强制显示调试横幅且扩展无法关闭；
+  换窗口之后横幅和后台标签页都不再打扰用户正在使用的窗口，导航校验能力不变。该窗口按需创建、
+  跨调用复用、空闲两分钟后关闭，并在 service worker 重启后可恢复。
+
 ### 修复
 
 - Chrome 原生 dialog 打开时保留 debugger 会话并暂停普通页面操作；用户手动按 Esc 关闭后会让旧视觉

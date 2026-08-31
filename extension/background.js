@@ -5,6 +5,14 @@
 
 import { BUNDLE_BUILD_ID } from "./build-info.js";
 import {
+  closeBackgroundTab,
+  closeBackgroundWindow,
+  forgetBackgroundTab,
+  forgetBackgroundWindow,
+  openBackgroundTab,
+  sweepBackgroundWindow,
+} from "./background_tabs.js";
+import {
   SWEEP_ALARM_NAME,
   closeAllCommentSessions,
   closeCommentSession,
@@ -290,6 +298,7 @@ function connectPort(port, config) {
     } else if (message.type === "bridge.shutdown") {
       void cleanupBridgeSessionsForPort(port);
       void closeAllCommentSessions();
+      void closeBackgroundWindow();
     } else if (message.type === "reload") {
       void reloadIfBundleChanged();
     }
@@ -381,7 +390,7 @@ async function dispatchBrowserFetch(state, message) {
   const guardTasks = new Set();
   let policyFailure = null;
   try {
-    const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+    const tab = await openBackgroundTab({ url: "about:blank" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a fetch tab");
     debuggerTarget = { tabId };
@@ -489,7 +498,7 @@ async function dispatchBrowserFetch(state, message) {
         await chrome.debugger.detach(debuggerTarget);
       } catch {}
     }
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -581,7 +590,7 @@ async function runBilibiliSearch(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: apiTarget.toString(), active: false });
+    const tab = await openBackgroundTab({ url: apiTarget.toString() });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Bilibili search tab");
     await waitForTabComplete(tabId);
@@ -597,7 +606,7 @@ async function runBilibiliSearch(state, args, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -709,7 +718,7 @@ async function runBilibiliVideo(state, args, includePlayinfo, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: target.toString(), active: false });
+    const tab = await openBackgroundTab({ url: target.toString() });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Bilibili video tab");
     await waitForTabComplete(tabId);
@@ -759,7 +768,7 @@ async function runBilibiliVideo(state, args, includePlayinfo, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -2111,7 +2120,7 @@ async function runZhihuSearch(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: "https://www.zhihu.com/", active: false });
+    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Zhihu search tab");
     await waitForTabComplete(tabId);
@@ -2140,7 +2149,7 @@ async function runZhihuSearch(state, args, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -2159,7 +2168,7 @@ async function runZhihuInvitations(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: "https://www.zhihu.com/", active: false });
+    const tab = await openBackgroundTab({ url: "https://www.zhihu.com/" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Zhihu invitations tab");
     await waitForTabComplete(tabId);
@@ -2215,7 +2224,7 @@ async function runZhihuInvitations(state, args, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -2493,10 +2502,7 @@ async function runXhsSearch(state, args, reply) {
   }
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({
-      url: "https://www.xiaohongshu.com/explore",
-      active: false,
-    });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS search tab");
     await waitForTabComplete(tabId);
@@ -2527,7 +2533,7 @@ async function runXhsSearch(state, args, reply) {
       clearTimeout(pending.timer);
       pendingXhsSearches.delete(tabId);
     }
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -2896,10 +2902,7 @@ async function runXhsUserNotes(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({
-      url: "https://www.xiaohongshu.com/explore",
-      active: false,
-    });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS profile tab");
     await waitForTabComplete(tabId);
@@ -3022,7 +3025,7 @@ async function runXhsUserNotes(state, args, reply) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
     if (tabId != null) pendingXhsUserNotes.delete(tabId);
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -3085,10 +3088,7 @@ async function runXhsNote(state, args, reply) {
 
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({
-      url: "https://www.xiaohongshu.com/explore",
-      active: false,
-    });
+    const tab = await openBackgroundTab({ url: "https://www.xiaohongshu.com/explore" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create an XHS note tab");
     await waitForTabComplete(tabId);
@@ -3106,7 +3106,7 @@ async function runXhsNote(state, args, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -3356,7 +3356,7 @@ async function runDouyinNoteRead(state, target, awemeId, reply) {
   }
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
+    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" });
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Douyin note tab");
     await waitForTabComplete(tabId);
@@ -3451,7 +3451,7 @@ async function runDouyinNoteRead(state, target, awemeId, reply) {
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -3464,7 +3464,7 @@ async function runDouyinObservedRead(state, target, kind, reply) {
   }
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: "https://www.douyin.com/", active: false });
+    const tab = await openBackgroundTab({ url: "https://www.douyin.com/" });
     tabId = tab.id;
     if (tabId == null) throw new Error(`Chrome did not create a Douyin ${kind} tab`);
     await waitForTabComplete(tabId);
@@ -3480,7 +3480,7 @@ async function runDouyinObservedRead(state, target, kind, reply) {
       clearTimeout(pending.timer);
       pendingDouyinReads.delete(tabId);
     }
-    if (tabId != null) await chrome.tabs.remove(tabId).catch(() => {});
+    await closeBackgroundTab(tabId);
   }
 }
 
@@ -3973,7 +3973,10 @@ chrome.alarms.create("browser-mcp-keepalive", { periodInMinutes: 1 });
 chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "browser-mcp-keepalive") connectAll();
-  else if (alarm.name === SWEEP_ALARM_NAME) void sweepCommentSessions();
+  else if (alarm.name === SWEEP_ALARM_NAME) {
+    void sweepCommentSessions();
+    void sweepBackgroundWindow();
+  }
 });
 chrome.runtime.onInstalled.addListener(connectAll);
 chrome.runtime.onStartup.addListener(connectAll);
@@ -3987,6 +3990,7 @@ chrome.debugger.onDetach.addListener((source) => {
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetBackgroundTab(tabId);
   void forgetCommentSessionByTab(tabId);
   for (const [session, managedTabId] of interactiveTabs.entries()) {
     if (managedTabId !== tabId) continue;
@@ -3994,5 +3998,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     lastInteractionScreenshots.delete(session);
     void closeInteractionDebugger(session);
   }
+});
+chrome.windows.onRemoved.addListener((windowId) => {
+  void forgetBackgroundWindow(windowId);
 });
 void connectAll();
