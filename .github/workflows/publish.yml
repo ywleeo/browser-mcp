@@ -20,7 +20,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Only a tag push carries a version to check against. A manual dispatch from a branch
+      # publishes whatever pyproject declares, which is the path for retrying a failed upload.
       - name: Check tag matches package version
+        if: github.ref_type == 'tag'
         id: version
         shell: bash
         run: |
