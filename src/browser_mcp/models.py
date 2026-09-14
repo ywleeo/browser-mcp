@@ -129,6 +129,18 @@ class BrowserViewport(BaseModel):
     document_width: int = Field(ge=1)
     document_height: int = Field(ge=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _round_css_pixels(cls, data: object) -> object:
+        """Round fractional CSS pixel geometry reported under page zoom or display scaling."""
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for key, value in normalized.items():
+            if key != "device_scale_factor" and isinstance(value, float):
+                normalized[key] = round(value)
+        return normalized
+
 
 class BrowserPageState(BaseModel):
     """Agent-facing visual page state returned after snapshots and actions."""

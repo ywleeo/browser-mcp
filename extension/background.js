@@ -1813,8 +1813,10 @@ async function captureVisualClickState(tabId, screenshot, debuggerTarget) {
   ]);
   const viewport = metrics?.cssVisualViewport || metrics?.visualViewport || {};
   const content = metrics?.cssContentSize || metrics?.contentSize || {};
-  const width = Math.max(1, Number(viewport.clientWidth) || screenshot.width);
-  const height = Math.max(1, Number(viewport.clientHeight) || screenshot.height);
+  const cssWidth = Math.max(1, Number(viewport.clientWidth) || screenshot.width);
+  const cssHeight = Math.max(1, Number(viewport.clientHeight) || screenshot.height);
+  const width = Math.round(cssWidth);
+  const height = Math.round(cssHeight);
   return {
     state: {
       action: "click",
@@ -1826,7 +1828,7 @@ async function captureVisualClickState(tabId, screenshot, debuggerTarget) {
         height,
         screenshot_width: screenshot.width,
         screenshot_height: screenshot.height,
-        device_scale_factor: Math.max(0.1, screenshot.width / width),
+        device_scale_factor: Math.max(0.1, screenshot.width / cssWidth),
         scroll_x: Math.max(0, Math.round(Number(viewport.pageX) || 0)),
         scroll_y: Math.max(0, Math.round(Number(viewport.pageY) || 0)),
         document_width: Math.max(width, Math.round(Number(content.width) || width)),
@@ -1953,13 +1955,13 @@ async function captureInteractionState(tabId, action, screenshot, debuggerTarget
         url: location.href,
         title: document.title || "",
         viewport: {
-          width: Math.max(1, innerWidth),
-          height: Math.max(1, innerHeight),
+          width: Math.max(1, Math.round(innerWidth)),
+          height: Math.max(1, Math.round(innerHeight)),
           device_scale_factor: Math.max(0.1, devicePixelRatio || 1),
           scroll_x: Math.max(0, Math.round(scrollX)),
           scroll_y: Math.max(0, Math.round(scrollY)),
-          document_width: Math.max(1, document.documentElement?.scrollWidth || innerWidth),
-          document_height: Math.max(1, document.documentElement?.scrollHeight || innerHeight),
+          document_width: Math.max(1, Math.round(document.documentElement?.scrollWidth || innerWidth)),
+          document_height: Math.max(1, Math.round(document.documentElement?.scrollHeight || innerHeight)),
         },
         elements,
         visible_text: String(document.body?.innerText || "").slice(0, textLimit),

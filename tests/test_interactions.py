@@ -19,8 +19,29 @@ from browser_mcp.models import (
     BrowserSelectRequest,
     BrowserSnapshotRequest,
     BrowserTypeRequest,
+    BrowserViewport,
 )
 from tests.helpers import FakeBridge, allow_public_url_policy
+
+
+def test_viewport_accepts_fractional_css_pixels() -> None:
+    """Page zoom reports fractional CSS geometry that must not fail the page state contract."""
+    viewport = BrowserViewport.model_validate(
+        {
+            "width": 710.4,
+            "height": 717.6,
+            "screenshot_width": 888,
+            "screenshot_height": 897,
+            "device_scale_factor": 1.25,
+            "scroll_x": 0,
+            "scroll_y": 0,
+            "document_width": 710.4,
+            "document_height": 3184.8,
+        },
+    )
+    assert (viewport.width, viewport.height) == (710, 718)
+    assert (viewport.document_width, viewport.document_height) == (710, 3185)
+    assert viewport.device_scale_factor == 1.25
 
 
 def test_click_request_requires_exactly_one_target_strategy() -> None:

@@ -2,6 +2,18 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.13.4] - 2026-09-14
+
+### 修复
+
+- 页面缩放不等于 100% 时，视觉交互不再返回 schema 校验错误。Chrome 在此时报告的 CSS 视口是小数
+  （如 `710.4 × 717.6`，125% 显示缩放下正是 `897 / 1.25`），扩展把未取整的 double 原样发出，而
+  `BrowserViewport.width/height` 声明为 `int`，`BrowserPageState` 因此在 `model_validate` 处失败——
+  动作其实已经执行完了，智能体却收到一个"失败"。扩展现在在出口取整，与旁边 `scroll_x`/`scroll_y`
+  的既有做法一致；`device_scale_factor` 仍用未取整的原始宽度计算，先取整再相除反而会引入误差。
+  服务端同时在解析边界把小数 CSS 像素归一到 int：缩放下的视口本就是小数，这是契约适配该待的地方，
+  也让尚未刷新的旧扩展不会再撞上同一个错。感谢 @liujf0 的[定位](https://github.com/ywleeo/browser-mcp/issues/2)。
+
 ## [0.13.3] - 2026-08-31
 
 ### 修复
