@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -135,10 +135,12 @@ class BrowserViewport(BaseModel):
         """Round fractional CSS pixel geometry reported under page zoom or display scaling."""
         if not isinstance(data, dict):
             return data
-        normalized = dict(data)
-        for key, value in normalized.items():
+        normalized: dict[str, object] = {}
+        for key, value in cast(dict[str, object], data).items():
             if key != "device_scale_factor" and isinstance(value, float):
                 normalized[key] = round(value)
+            else:
+                normalized[key] = value
         return normalized
 
 
