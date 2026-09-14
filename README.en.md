@@ -189,6 +189,18 @@ server, and the server itself is fetched from PyPI (`ai-browser-mcp`) via `uvx`,
 so `uv` must be on `PATH` but no local checkout is required. Remove it with
 `dsh plugin --profile web remove "@ywleeo/dsh-browser-mcp"`.
 
+To make dsh run a local checkout instead of the published PyPI release — handy for
+trying out your own changes — use this instead:
+
+```bash
+python3 scripts/install-dsh.py --profile web
+```
+
+It writes an `insert` entry pointing at the current project directory into
+`~/.dsh/profiles/<profile>/cordis.patch.yml`, and is idempotent (it skips when the
+plugin id is already present). Pass `--uv` / `--project-dir` if `uv` or the project
+root cannot be located automatically.
+
 ### 5. Start using it
 
 Once connected, just describe what you want in plain language:

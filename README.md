@@ -178,6 +178,15 @@ dsh plugin --profile web add "github:ywleeo/browser-mcp#main"
 而服务本身由 `uvx` 从 PyPI（`ai-browser-mcp`）拉起，所以只要 `PATH` 里有 `uv`
 即可，无需本地 checkout。卸载用 `dsh plugin --profile web remove "@ywleeo/dsh-browser-mcp"`。
 
+若要让 dsh 跑本地 checkout 而非 PyPI 发布版（改完代码直接验证），改用：
+
+```bash
+python3 scripts/install-dsh.py --profile web
+```
+
+它把一条指向当前项目目录的 `insert` 配置写进 `~/.dsh/profiles/<profile>/cordis.patch.yml`，
+按 id 判重可重复执行。`uv` 或项目根找不到时用 `--uv` / `--project-dir` 指定。
+
 ### 5. 直接开用
 
 连接成功后，直接用自然语言告诉你的 AI 助手，例如：
