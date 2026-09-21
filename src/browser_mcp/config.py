@@ -11,6 +11,8 @@ from platformdirs import user_data_path
 
 DEFAULT_BRIDGE_PORT = 17_880
 DEFAULT_BRIDGE_PORT_POOL_SIZE = 10
+DEFAULT_IDLE_TIMEOUT_SECONDS = 3_600.0
+DEFAULT_RECLAIM_IDLE_SECONDS = 300.0
 DEFAULT_DATA_DIR = user_data_path("browser-mcp", appauthor=False)
 LOG_LEVELS = {
     "CRITICAL": logging.CRITICAL,
@@ -27,6 +29,8 @@ class AppSettings:
 
     bridge_port: int = DEFAULT_BRIDGE_PORT
     bridge_port_pool_size: int = DEFAULT_BRIDGE_PORT_POOL_SIZE
+    idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
+    reclaim_idle_seconds: float = DEFAULT_RECLAIM_IDLE_SECONDS
     data_dir: Path = DEFAULT_DATA_DIR
     extension_dir: Path = Path()
     log_level: int = logging.INFO
@@ -39,6 +43,10 @@ class AppSettings:
             raise ValueError("bridge_port_pool_size must be between 1 and 100")
         if self.bridge_port + self.bridge_port_pool_size - 1 > 65_535:
             raise ValueError("bridge port pool must end at or below 65535")
+        if self.idle_timeout_seconds < 0:
+            raise ValueError("idle_timeout_seconds must not be negative")
+        if self.reclaim_idle_seconds < 0:
+            raise ValueError("reclaim_idle_seconds must not be negative")
         if not self.data_dir.is_absolute():
             raise ValueError("data_dir must be an absolute path")
         extension_dir = self.extension_dir
@@ -66,11 +74,23 @@ class AppSettings:
     def from_env(cls) -> AppSettings:
         """Build validated settings from Browser MCP environment variables."""
         bridge_port = _parse_port(os.getenv("BROWSER_MCP_BRIDGE_PORT"))
+        idle_timeout = _parse_seconds(
+            os.getenv("BROWSER_MCP_IDLE_TIMEOUT_SECONDS"),
+            "BROWSER_MCP_IDLE_TIMEOUT_SECONDS",
+            DEFAULT_IDLE_TIMEOUT_SECONDS,
+        )
+        reclaim_idle = _parse_seconds(
+            os.getenv("BROWSER_MCP_RECLAIM_IDLE_SECONDS"),
+            "BROWSER_MCP_RECLAIM_IDLE_SECONDS",
+            DEFAULT_RECLAIM_IDLE_SECONDS,
+        )
         data_dir = _parse_data_dir(os.getenv("BROWSER_MCP_DATA_DIR"))
         extension_dir = _parse_extension_dir(os.getenv("BROWSER_MCP_EXTENSION_DIR"))
         log_level = _parse_log_level(os.getenv("BROWSER_MCP_LOG_LEVEL"))
         return cls(
             bridge_port=bridge_port,
+            idle_timeout_seconds=idle_timeout,
+            reclaim_idle_seconds=reclaim_idle,
             data_dir=data_dir,
             extension_dir=extension_dir,
             log_level=log_level,
@@ -106,6 +126,19 @@ def _parse_port(raw: str | None) -> int:
     if not 1 <= port <= 65_535:
         raise ValueError("BROWSER_MCP_BRIDGE_PORT must be between 1 and 65535")
     return port
+
+
+def _parse_seconds(raw: str | None, variable: str, default: float) -> float:
+    """Parse one optional non-negative duration in seconds, where zero disables it."""
+    if raw is None:
+        return default
+    try:
+        seconds = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{variable} must be a number of seconds") from error
+    if seconds < 0:
+        raise ValueError(f"{variable} must not be negative")
+    return seconds
 
 
 def _parse_log_level(raw: str | None) -> int:

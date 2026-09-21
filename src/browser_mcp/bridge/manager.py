@@ -7,6 +7,8 @@ import errno
 import hmac
 import json
 import logging
+import os
+import signal
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 from uuid import uuid4
@@ -17,14 +19,17 @@ from websockets.exceptions import ConnectionClosed
 
 from browser_mcp.bridge.bundle import ExtensionBundle, InstalledExtension
 from browser_mcp.bridge.protocol import ConnectionMetadata, ExtensionHello
+from browser_mcp.bridge.registry import PortRegistry
 from browser_mcp.config import AppSettings
 from browser_mcp.models import (
     BrowserFetchPayload,
     BrowserPageState,
     BrowserReadRequest,
     BrowserStatus,
+    BrowserTabsResult,
     BrowserVisualResult,
 )
+from browser_mcp.process_lifecycle import resolve_owner_pid
 from browser_mcp.security import PublicUrlPolicy, UrlPolicyError
 from browser_mcp.upgrade import installation_metadata
 
@@ -33,6 +38,7 @@ BRIDGE_PATH: Final = "/browser-mcp-extension"
 HELLO_TIMEOUT_SECONDS: Final = 5.0
 PROBE_TIMEOUT_SECONDS: Final = 1.5
 KEEPALIVE_SECONDS: Final = 20.0
+IDLE_CHECK_MIN_SECONDS: Final = 1.0
 FETCH_TIMEOUT_SECONDS: Final = 65.0
 INTERACTION_TIMEOUT_SECONDS: Final = 65.0
 SHUTDOWN_NOTIFY_TIMEOUT_SECONDS: Final = 1.0
@@ -59,6 +65,7 @@ class BridgeManager:
             settings.bridge_port_pool_size,
             BRIDGE_PATH,
         )
+        self._registry = PortRegistry(settings.data_dir)
         self._installed: InstalledExtension | None = None
         self._server: Server | None = None
         self._port: int | None = None
@@ -70,7 +77,7 @@ class BridgeManager:
         self._pending_pings: dict[str, asyncio.Future[bool]] = {}
         self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._url_policy = url_policy or PublicUrlPolicy()
-        self._keepalive_task: asyncio.Task[None] | None = None
+        self._background_tasks: list[asyncio.Task[None]] = []
         self._installation = installation_metadata()
 
     @property
@@ -79,47 +86,76 @@ class BridgeManager:
         return self._installed
 
     async def start(self) -> None:
-        """Install the extension and bind the first free port exactly once."""
+        """Install the extension and bind one pooled port, reclaiming an abandoned one if needed."""
         async with self._start_lock:
             if self._server is not None:
                 return
             self._installed = self._bundle.ensure_installed()
-            last_error: OSError | None = None
-            for port in self._settings.bridge_ports:
-                try:
-                    self._server = await serve(
-                        self._handle_connection,
-                        "127.0.0.1",
-                        port,
-                        origins=[None, self._chrome_extension_origin_pattern()],
-                        compression=None,
-                        ping_interval=None,
-                        max_size=MAX_MESSAGE_BYTES,
-                        server_header=None,
-                    )
-                except OSError as error:
-                    if error.errno != errno.EADDRINUSE:
-                        raise
-                    last_error = error
-                    continue
-                self._port = port
-                self._keepalive_task = asyncio.create_task(
-                    self._keepalive_loop(), name="browser-mcp-bridge-keepalive"
+            bound = await self._bind_pooled_port()
+            if bound is None:
+                released = await asyncio.to_thread(
+                    self._registry.reclaim,
+                    self._settings.bridge_ports,
+                    min_idle_seconds=self._settings.reclaim_idle_seconds,
                 )
-                LOGGER.info("bridge.listen port=%s", port)
-                return
-            end_port = self._settings.bridge_ports[-1]
-            raise RuntimeError(
-                f"all Browser MCP bridge ports are in use: {self._settings.bridge_port}-{end_port}"
-            ) from last_error
+                if released:
+                    LOGGER.info("bridge.reclaimed ports=%s", ",".join(str(p) for p in released))
+                    bound = await self._bind_pooled_port()
+            if bound is None:
+                raise RuntimeError(self._pool_exhausted_message())
+            server, port = bound
+            self._server = server
+            self._port = port
+            self._registry.claim(
+                port,
+                owner_pid=resolve_owner_pid(),
+                server_version=self._installation.server_version,
+            )
+            self._background_tasks = [
+                asyncio.create_task(self._keepalive_loop(), name="browser-mcp-bridge-keepalive"),
+                asyncio.create_task(self._idle_loop(), name="browser-mcp-bridge-idle"),
+            ]
+            LOGGER.info("bridge.listen port=%s", port)
+
+    async def _bind_pooled_port(self) -> tuple[Server, int] | None:
+        """Bind the first free pooled port, or report that every one of them is taken."""
+        for port in self._settings.bridge_ports:
+            try:
+                server = await serve(
+                    self._handle_connection,
+                    "127.0.0.1",
+                    port,
+                    origins=[None, self._chrome_extension_origin_pattern()],
+                    compression=None,
+                    ping_interval=None,
+                    max_size=MAX_MESSAGE_BYTES,
+                    server_header=None,
+                )
+            except OSError as error:
+                if error.errno != errno.EADDRINUSE:
+                    raise
+                continue
+            return server, port
+        return None
+
+    def _pool_exhausted_message(self) -> str:
+        """Name the processes holding the pool so the failure is actionable without stderr."""
+        first, last = self._settings.bridge_port_range
+        return (
+            f"all Browser MCP bridge ports are in use: {first}-{last}\n"
+            f"{self._registry.describe(self._settings.bridge_ports)}\n"
+            "Every port is held by a server that was used too recently to reclaim. Quit one of "
+            "the MCP hosts listed above, or lower BROWSER_MCP_RECLAIM_IDLE_SECONDS."
+        )
 
     async def close(self) -> None:
         """Close the active extension and listener, failing all pending probes."""
-        task = self._keepalive_task
-        self._keepalive_task = None
-        if task is not None:
+        tasks = self._background_tasks
+        self._background_tasks = []
+        for task in tasks:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self._connection_lock:
             connection = self._connection
@@ -144,10 +180,12 @@ class BridgeManager:
         if server is not None:
             server.close()
             await server.wait_closed()
+        self._registry.release()
 
     async def status(self) -> BrowserStatus:
         """Start the listener, round-trip probe Chrome, and return diagnostics."""
         await self.start()
+        self._registry.touch()
         connected = await self._probe()
         metadata = self._connection_metadata
         installed = self._require_installed()
@@ -217,6 +255,11 @@ class BridgeManager:
             action=action,
             timeout_seconds=timeout_seconds,
         )
+
+    async def list_tabs(self) -> BrowserTabsResult:
+        """Return every open webpage tab the paired Chrome profile is showing."""
+        data = await self._request("browser.tabs", {}, timeout_seconds=PROBE_TIMEOUT_SECONDS * 8)
+        return BrowserTabsResult.model_validate(data)
 
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Execute one bounded action in the extension-managed interactive tab."""
@@ -304,6 +347,7 @@ class BridgeManager:
             "bilibili.fetch.result",
             "browser.fetch.result",
             "browser.interact.result",
+            "browser.tabs.result",
             "douyin.fetch.result",
             "douyin.mutate.result",
             "zhihu.fetch.result",
@@ -324,6 +368,7 @@ class BridgeManager:
     ) -> dict[str, Any]:
         """Send one id-correlated command and fail promptly on timeout or disconnect."""
         await self.start()
+        self._registry.touch()
         async with self._connection_lock:
             connection = self._connection
         if connection is None:
@@ -432,6 +477,44 @@ class BridgeManager:
                 await self._probe()
         except asyncio.CancelledError:
             raise
+
+    async def _idle_loop(self) -> None:
+        """Poll for disuse on its own cadence so a short idle window still retires promptly."""
+        timeout = self._settings.idle_timeout_seconds
+        if timeout <= 0:
+            return
+        interval = min(KEEPALIVE_SECONDS, max(IDLE_CHECK_MIN_SECONDS, timeout / 4))
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                self._retire_when_idle()
+        except asyncio.CancelledError:
+            raise
+
+    def _retire_when_idle(self) -> None:
+        """Return the pooled port to the pool once no MCP request has arrived for long enough.
+
+        The extension reconnects to every pooled port on its own, so socket presence
+        says nothing about whether this server is still wanted; only real MCP traffic
+        does. Retiring stops at SIGTERM rather than closing the listener, because the
+        stdio transport must end with the process for the host to notice.
+        """
+        timeout = self._settings.idle_timeout_seconds
+        if timeout <= 0:
+            return
+        idle = self._registry.idle_seconds()
+        if idle is None or idle < timeout:
+            return
+        LOGGER.warning(
+            "bridge.idle_retire port=%s idle=%.0fs; releasing the pooled port",
+            self._port,
+            idle,
+        )
+        # SIGTERM ends the process outright, so the lifespan teardown that normally
+        # returns the lease never runs. Hand the port back first and leave nothing
+        # for the next server to clean up.
+        self._registry.release()
+        os.kill(os.getpid(), signal.SIGTERM)
 
     async def _replace_connection(
         self, connection: ServerConnection, metadata: ConnectionMetadata

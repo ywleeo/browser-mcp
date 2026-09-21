@@ -49,28 +49,59 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "chrome.tabs.captureVisibleTab" not in background
     assert "async function executeTrustedClick" in background
     click_implementation = background.split("async function executeTrustedClick", 1)[1].split(
-        "/** Apply one bounded keyboard behavior", 1
+        "/** CDP definitions for the bounded key set", 1
     )[0]
     assert ".click()" not in click_implementation
     assert "await dispatchTrustedPointerMove(debuggerTarget, clickPoint)" in click_implementation
     assert "await readInteractionHoverNode(debuggerTarget, clickPoint)" in click_implementation
     assert (
-        "await dispatchTrustedPointClick(debuggerTarget, clickPoint, false)"
-        in click_implementation
+        "await dispatchTrustedPointClick(debuggerTarget, clickPoint, false)" in click_implementation
     )
     assert "DOM.resolveNode" not in click_implementation
     assert "querySelector" not in click_implementation
     assert 'chrome.debugger.sendCommand(debuggerTarget, "DOM.getNodeForLocation"' in background
+    assert "async function releaseBridgeDebuggersForPort" in background
+    release_implementation = background.split("async function releaseBridgeDebuggersForPort", 1)[
+        1
+    ].split("/** Give a dropped connection", 1)[0]
+    assert "chrome.windows.remove" not in release_implementation
+    assert "deleteInteractionSession" not in release_implementation
+    assert "closeBackgroundTabsForPort" not in release_implementation
+    close_handler = background.split("socket.onclose = () => {", 1)[1].split("};", 1)[0]
+    assert "void releaseBridgeDebuggersForPort(port);" in close_handler
+    assert "scheduleOrphanCleanup(port);" in close_handler
+    assert "cleanupBridgeSessionsForPort" not in close_handler
+    assert (
+        "cancelOrphanCleanup(port);\n      void cleanupBridgeSessionsForPort(port);" in background
+    )
+    assert "ORPHAN_GRACE_MINUTES" in background
+    assert "async function executeTrustedPress" in background
+    assert "async function executeDomPress" not in background
+    press_implementation = background.split("async function executeTrustedPress", 1)[1].split(
+        "/** Bring one referenced element into view", 1
+    )[0]
+    assert 'chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchKeyEvent"' in (
+        press_implementation
+    )
+    assert "new KeyboardEvent" not in press_implementation
+    assert "requestSubmit" not in press_implementation
+    assert ".click()" not in press_implementation
+    assert "TRUSTED_KEY_DEFINITIONS" in background
+    scroll_implementation = background.split("async function executeScroll", 1)[1].split(
+        "/** Enter text through Chrome", 1
+    )[0]
+    assert 'type: "mouseWheel"' in scroll_implementation
+    assert "window.scrollBy" not in scroll_implementation
+    assert "await resolveScrollPoint(tabId, args)" in scroll_implementation
     assert "async function readInteractionHoverNode" in background
     assert "async function captureVisualClickState" in background
     assert 'chrome.debugger.sendCommand(debuggerTarget, "Page.getLayoutMetrics"' in background
     assert (
         'if (action !== "click" && action !== "dialog") '
-        "await removeForeignExtensionFrames(tabId);"
-        in background
+        "await removeForeignExtensionFrames(tabId);" in background
     )
     assert "async function focusManagedInteractionWindow" in background
-    assert 'chrome.windows.update(managedWindowId, { focused: true })' in background
+    assert "chrome.windows.update(managedWindowId, { focused: true })" in background
     assert "async function restoreInteractionWindowFocus" in background
     assert 'method === "Page.javascriptDialogOpening"' in background
     assert 'method === "Page.javascriptDialogClosed"' in background

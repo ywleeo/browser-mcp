@@ -35,6 +35,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "browser_snapshot",
         "browser_click",
         "browser_dialog",
+        "browser_tabs",
         "browser_scroll",
         "browser_type",
         "browser_press",

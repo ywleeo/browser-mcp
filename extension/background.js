@@ -27,6 +27,10 @@ const DEFAULT_BASE_PORT = 17880;
 const DEFAULT_POOL_SIZE = 10;
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
+// A dropped socket is usually a sleeping service worker, so an interaction window is
+// only reclaimed after the port has stayed unreachable for this long.
+const ORPHAN_ALARM_PREFIX = "browser-mcp-orphan-";
+const ORPHAN_GRACE_MINUTES = 5;
 // Public-DNS verification can use two proxy-safe DoH fallbacks before approval.
 const URL_CHECK_TIMEOUT_MS = 20000;
 const PAGE_LOAD_TIMEOUT_MS = 30000;
@@ -229,6 +233,46 @@ async function cleanupBridgeSessionsForPort(port) {
   }
 }
 
+/** Release only what cannot outlive a dropped socket, keeping the agent's tab and window.
+ *
+ * A closed socket is not a stopped server. An MV3 service worker sleeps after seconds of
+ * inactivity and reconnects on its own, so tearing the interaction window down here
+ * destroyed whatever the page was holding -- a half-filled form, an editor with unsaved
+ * work -- every time an agent paused to ask the user a question. Debugger attachments
+ * cannot be left dangling, so those still go; the tab and window bindings stay and are
+ * picked up when the same port serves again.
+ */
+async function releaseBridgeDebuggersForPort(port) {
+  const prefix = `${port}:`;
+  const sessions = new Set([
+    ...[...interactionDebuggers.keys()].filter((session) => session.startsWith(prefix)),
+    ...[...interactionQueues.keys()].filter((session) => session.startsWith(prefix)),
+  ]);
+  for (const session of sessions) {
+    interactionQueues.delete(session);
+    await closeInteractionDebugger(session);
+  }
+}
+
+/** Give a dropped connection a grace period to come back before its window is reclaimed. */
+function scheduleOrphanCleanup(port) {
+  chrome.alarms.create(`${ORPHAN_ALARM_PREFIX}${port}`, {
+    delayInMinutes: ORPHAN_GRACE_MINUTES,
+  });
+}
+
+/** Cancel the reclaim timer as soon as the same port is serving again. */
+function cancelOrphanCleanup(port) {
+  void chrome.alarms.clear(`${ORPHAN_ALARM_PREFIX}${port}`);
+}
+
+/** Reclaim the window of a port that never came back within its grace period. */
+async function reclaimOrphanedPort(port) {
+  await cleanupBridgeSessionsForPort(port);
+  await closeCommentSessionsForPort(port);
+  await closeBackgroundTabsForPort(port);
+}
+
 /** Schedule one bounded exponential-backoff reconnect. */
 function scheduleReconnect(port, config, state) {
   if (state.disabled || state.timer) return;
@@ -255,6 +299,7 @@ function connectPort(port, config) {
 
   socket.onopen = () => {
     state.delay = RECONNECT_MIN_MS;
+    cancelOrphanCleanup(port);
     sendJson(state, {
       type: "hello",
       token: config.token,
@@ -281,6 +326,8 @@ function connectPort(port, config) {
       void dispatchBrowserFetch(state, message);
     } else if (message.type === "browser.interact") {
       scheduleBrowserInteraction(state, message);
+    } else if (message.type === "browser.tabs") {
+      void dispatchBrowserTabs(state, message);
     } else if (message.type === "zhihu.fetch") {
       void dispatchZhihuFetch(state, message);
     } else if (message.type === "bilibili.fetch") {
@@ -294,6 +341,7 @@ function connectPort(port, config) {
     } else if (message.type === "douyin.mutate") {
       void dispatchDouyinMutation(state, message);
     } else if (message.type === "bridge.shutdown") {
+      cancelOrphanCleanup(port);
       void cleanupBridgeSessionsForPort(port);
       void closeCommentSessionsForPort(port);
       void closeBackgroundTabsForPort(port);
@@ -306,7 +354,8 @@ function connectPort(port, config) {
     if (state.socket !== socket) return;
     state.socket = null;
     failUrlChecksForState(state);
-    void cleanupBridgeSessionsForPort(port);
+    void releaseBridgeDebuggersForPort(port);
+    scheduleOrphanCleanup(port);
     scheduleReconnect(port, config, state);
   };
   socket.onerror = () => {};
@@ -323,7 +372,7 @@ function scheduleBrowserInteraction(state, message) {
   void current.finally(() => {
     if (interactionQueues.get(session) === current) interactionQueues.delete(session);
     if (state.socket?.readyState !== WebSocket.OPEN) {
-      void cleanupBridgeSessionsForPort(state.port);
+      void releaseBridgeDebuggersForPort(state.port);
     }
   });
 }
@@ -755,6 +804,35 @@ async function runBilibiliVideo(state, args, includePlayinfo, reply) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {
     await closeBackgroundTab(tabId);
+  }
+}
+
+/** Report the open webpage tabs so an agent can find work it left in another tab.
+ *
+ * Only http(s) tabs are listed. Browser pages, extension pages and local files say
+ * more about the person than about the task, so they never leave the extension.
+ */
+async function dispatchBrowserTabs(state, message) {
+  const reply = (payload) => sendJson(
+    state,
+    { type: "browser.tabs.result", id: message.id, ...payload },
+  );
+  try {
+    const tabs = await chrome.tabs.query({});
+    const pages = [];
+    for (const tab of tabs || []) {
+      if (!/^https?:/i.test(String(tab.url || ""))) continue;
+      pages.push({
+        tab_id: Number(tab.id),
+        window_id: Number(tab.windowId),
+        url: String(tab.url || ""),
+        title: String(tab.title || ""),
+        active: Boolean(tab.active),
+      });
+    }
+    reply({ ok: true, data: { tabs: pages } });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error) });
   }
 }
 
@@ -1345,7 +1423,7 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
     return;
   }
   if (action === "scroll") {
-    await executeScroll(tabId, args);
+    await executeScroll(tabId, args, debuggerTarget);
     return;
   }
   if (action === "type") {
@@ -1362,7 +1440,7 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
     }
     if (args.submit === true) {
       try {
-        await executeDomPress(tabId, "Enter", String(args.element_id || ""));
+        await executeTrustedPress(tabId, "Enter", String(args.element_id || ""), debuggerTarget);
       } catch (error) {
         throw new Error(`submit text: ${error?.message || error}`);
       }
@@ -1370,7 +1448,7 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
     return;
   }
   if (action === "press") {
-    await executeDomPress(tabId, String(args.key || ""), args.element_id || null);
+    await executeTrustedPress(tabId, String(args.key || ""), args.element_id || null, debuggerTarget);
     return;
   }
   if (action === "select") {
@@ -1565,91 +1643,155 @@ async function readInteractionHoverNode(debuggerTarget, point) {
     : null;
 }
 
-/** Apply one bounded keyboard behavior and dispatch matching DOM keyboard events. */
-async function executeDomPress(tabId, key, elementId) {
-  const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId },
+/** CDP definitions for the bounded key set agents may press. */
+const TRUSTED_KEY_DEFINITIONS = {
+  Enter: { code: "Enter", keyCode: 13, text: "\r" },
+  Escape: { code: "Escape", keyCode: 27 },
+  Tab: { code: "Tab", keyCode: 9, text: "\t" },
+  ArrowUp: { code: "ArrowUp", keyCode: 38 },
+  ArrowDown: { code: "ArrowDown", keyCode: 40 },
+  ArrowLeft: { code: "ArrowLeft", keyCode: 37 },
+  ArrowRight: { code: "ArrowRight", keyCode: 39 },
+  PageUp: { code: "PageUp", keyCode: 33 },
+  PageDown: { code: "PageDown", keyCode: 34 },
+  Home: { code: "Home", keyCode: 36 },
+  End: { code: "End", keyCode: 35 },
+  Backspace: { code: "Backspace", keyCode: 8 },
+  Delete: { code: "Delete", keyCode: 46 },
+  " ": { code: "Space", keyCode: 32, text: " " },
+};
+
+/** Focus one referenced element, in any frame, before a trusted key reaches the page. */
+async function focusInteractionTarget(tabId, elementId) {
+  const executions = await executeInteractionFrames(tabId, {
     world: "MAIN",
-    args: [key, elementId],
-    func: (pressedKey, targetId) => {
-      const supported = new Set([
-        "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-        "PageUp", "PageDown", "Home", "End", "Backspace", "Delete", " ",
-      ]);
-      if (!supported.has(pressedKey)) return { error: `unsupported browser key: ${pressedKey}` };
-      let element = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      if (targetId) {
-        const escaped = CSS.escape(targetId);
-        const referenced = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
-        if (!(referenced instanceof HTMLElement)) {
-          return { error: `element reference is stale: ${targetId}; take a new snapshot` };
+    args: [elementId],
+    func: (targetId) => {
+      const roots = [document];
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const candidate of roots[index].querySelectorAll("*")) {
+          if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
         }
-        element = referenced;
-        element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-        element.focus();
       }
-      const target = element || document.body;
-      target.dispatchEvent(new KeyboardEvent("keydown", {
-        key: pressedKey,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-      }));
-      if (pressedKey === "Enter") {
-        const form = target.closest("form");
-        if (form instanceof HTMLFormElement) form.requestSubmit();
-        else if (target instanceof HTMLElement) target.click();
-      } else if (pressedKey === "Tab") {
-        const focusable = [...document.querySelectorAll(
-          "a[href],button,input,textarea,select,[tabindex]:not([tabindex='-1'])",
-        )].filter((candidate) => candidate instanceof HTMLElement && !candidate.hidden);
-        const index = focusable.indexOf(target);
-        const next = focusable[(index + 1 + focusable.length) % focusable.length];
-        if (next instanceof HTMLElement) next.focus();
-      } else if (["PageUp", "PageDown", "Home", "End"].includes(pressedKey)) {
-        const top = pressedKey === "Home" ? 0
-          : pressedKey === "End" ? document.documentElement.scrollHeight
-          : scrollY + (pressedKey === "PageUp" ? -innerHeight * 0.8 : innerHeight * 0.8);
-        window.scrollTo({ top, behavior: "instant" });
+      const escaped = CSS.escape(targetId);
+      let element = null;
+      for (const root of roots) {
+        element = root.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
+        if (element) break;
       }
-      target.dispatchEvent(new KeyboardEvent("keyup", {
-        key: pressedKey,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-      }));
+      if (!(element instanceof HTMLElement)) return { skipped: true };
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      element.focus();
       return { ok: true };
     },
-  });
-  if (!result || result.error) throw new Error(result?.error || "key press failed");
+  }, true);
+  const result = executions.map((execution) => execution.result).find(
+    (candidate) => candidate && !candidate.skipped,
+  );
+  if (!result || result.error) {
+    throw new Error(
+      result?.error || `element reference is stale: ${elementId}; take a new snapshot`,
+    );
+  }
 }
 
-/** Scroll relatively in CSS pixels or bring one referenced element into view. */
-async function executeScroll(tabId, args) {
+/** Press one bounded key through Chrome's trusted input pipeline.
+ *
+ * Synthetic KeyboardEvents cannot move focus, submit a form or commit an edited
+ * value: the browser ignores `isTrusted: false` for its own default actions, so a
+ * framework-controlled field keeps the value the page last rendered. Dispatching
+ * through CDP makes Tab a real Tab, which is what fires `change` on blur.
+ */
+async function executeTrustedPress(tabId, key, elementId, debuggerTarget) {
+  const definition = TRUSTED_KEY_DEFINITIONS[key];
+  if (!definition) throw new Error(`unsupported browser key: ${key}`);
+  if (!debuggerTarget) throw new Error("trusted key input requires an attached Chrome debugger");
+  if (elementId) await focusInteractionTarget(tabId, elementId);
+  const shared = {
+    key,
+    code: definition.code,
+    windowsVirtualKeyCode: definition.keyCode,
+    nativeVirtualKeyCode: definition.keyCode,
+  };
+  await chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchKeyEvent", {
+    type: definition.text ? "keyDown" : "rawKeyDown",
+    ...shared,
+    ...(definition.text ? { text: definition.text, unmodifiedText: definition.text } : {}),
+  });
+  await chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...shared,
+  });
+}
+
+/** Bring one referenced element into view, scrolling whichever container holds it. */
+async function scrollReferencedElementIntoView(tabId, elementId) {
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [args.element_id || null, String(args.direction || "down"), Number(args.amount) || 600],
-    func: (elementId, direction, amount) => {
-      if (elementId) {
-        const escaped = CSS.escape(elementId);
-        const element = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
-        if (!element) return { error: `element reference is stale: ${elementId}; take a new snapshot` };
-        element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-        return { ok: true };
+    args: [elementId],
+    func: (targetId) => {
+      const escaped = CSS.escape(targetId);
+      const element = document.querySelector(`[data-browser-mcp-ref="${escaped}"]`);
+      if (!element) {
+        return { error: `element reference is stale: ${targetId}; take a new snapshot` };
       }
-      const deltas = {
-        up: [0, -amount],
-        down: [0, amount],
-        left: [-amount, 0],
-        right: [amount, 0],
-      };
-      const [left, top] = deltas[direction] || deltas.down;
-      window.scrollBy({ left, top, behavior: "instant" });
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       return { ok: true };
     },
   });
   if (!result || result.error) throw new Error(result?.error || "scroll failed");
+}
+
+/** Resolve the viewport point whose scroll container should receive the wheel. */
+async function resolveScrollPoint(tabId, args) {
+  const requestedX = Number(args.x);
+  const requestedY = Number(args.y);
+  if (Number.isFinite(requestedX) && Number.isFinite(requestedY)) {
+    return { x: requestedX, y: requestedY };
+  }
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      x: Math.round(Math.max(1, innerWidth) / 2),
+      y: Math.round(Math.max(1, innerHeight) / 2),
+    }),
+  });
+  return result && Number.isFinite(result.x) ? result : { x: 1, y: 1 };
+}
+
+/** Scroll the container under one point, or bring a referenced element into view.
+ *
+ * `window.scrollBy` only ever moves the document, so any page that scrolls inside
+ * an element -- an editor canvas, a settings panel, a virtualized list -- stayed
+ * frozen. A CDP wheel event is delivered at a point, so Chrome routes it to the
+ * scroll container actually under that point, exactly like a real wheel.
+ */
+async function executeScroll(tabId, args, debuggerTarget) {
+  if (args.element_id) {
+    await scrollReferencedElementIntoView(tabId, String(args.element_id));
+    return;
+  }
+  if (!debuggerTarget) throw new Error("trusted scrolling requires an attached Chrome debugger");
+  const amount = Number(args.amount) || 600;
+  const deltas = {
+    up: [0, -amount],
+    down: [0, amount],
+    left: [-amount, 0],
+    right: [amount, 0],
+  };
+  const [deltaX, deltaY] = deltas[String(args.direction || "down")] || deltas.down;
+  const point = await resolveScrollPoint(tabId, args);
+  await dispatchTrustedPointerMove(debuggerTarget, point);
+  await chrome.debugger.sendCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: point.x,
+    y: point.y,
+    deltaX,
+    deltaY,
+    button: "none",
+    buttons: 0,
+  });
 }
 
 /** Enter text through Chrome's trusted input pipeline after selecting the live editor range. */
@@ -3964,6 +4106,10 @@ chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "browser-mcp-keepalive") connectAll();
   else if (alarm.name === SWEEP_ALARM_NAME) void sweepCommentSessions();
+  else if (alarm.name.startsWith(ORPHAN_ALARM_PREFIX)) {
+    const port = Number(alarm.name.slice(ORPHAN_ALARM_PREFIX.length));
+    if (Number.isInteger(port)) void reclaimOrphanedPort(port);
+  }
 });
 chrome.runtime.onInstalled.addListener(connectAll);
 chrome.runtime.onStartup.addListener(connectAll);

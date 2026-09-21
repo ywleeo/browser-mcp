@@ -28,6 +28,7 @@ from browser_mcp.models import (
     BrowserSelectRequest,
     BrowserSnapshotRequest,
     BrowserStatus,
+    BrowserTabsResult,
     BrowserTypeRequest,
     BrowserVisualResult,
     ExtractMode,
@@ -244,10 +245,16 @@ def create_server(
         )
         return _visual_tool_result(await browser_service.handle_dialog(request))
 
+    async def _browser_tabs() -> BrowserTabsResult:
+        """List the open webpage tabs in the paired Chrome profile."""
+        return await browser_service.list_tabs()
+
     async def _browser_scroll(
         direction: BrowserScrollDirection = BrowserScrollDirection.DOWN,
         amount: int = 600,
         element_id: str | None = None,
+        x: float | None = None,
+        y: float | None = None,
         wait_ms: int = 300,
     ) -> CallToolResult:
         """Scroll relatively or bring one current element reference into view."""
@@ -255,6 +262,8 @@ def create_server(
             direction=direction,
             amount=amount,
             element_id=element_id,
+            x=x,
+            y=y,
             wait_ms=wait_ms,
         )
         return _visual_tool_result(await browser_service.scroll(request))
@@ -639,11 +648,30 @@ def create_server(
         ),
     )
     server.add_tool(
+        _browser_tabs,
+        name="browser_tabs",
+        description=(
+            "List the open webpage tabs in the paired Chrome profile, with their tab id, "
+            "URL and title. Use it to find a page you opened earlier, or to confirm a tab "
+            "is still open. Only http(s) tabs are reported; browser and extension pages are "
+            "never returned. This is read-only and does not focus or change any tab."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    )
+    server.add_tool(
         _browser_scroll,
         name="browser_scroll",
         description=(
             "Scroll the managed page in one direction or bring a current element reference "
-            "into view, then return the new screenshot and references."
+            "into view, then return the new screenshot and references. The wheel lands at "
+            "x/y from the latest screenshot, so pass a point inside a scrollable pane "
+            "(an editor canvas, a settings panel) to scroll that pane instead of the page; "
+            "without x/y the viewport centre is used."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,

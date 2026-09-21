@@ -12,6 +12,8 @@ from browser_mcp.models import (
     BrowserPageState,
     BrowserReadRequest,
     BrowserStatus,
+    BrowserTab,
+    BrowserTabsResult,
     BrowserViewport,
     BrowserVisualResult,
 )
@@ -72,6 +74,20 @@ class FakeBridge:
             bridge_port_pool=(17_880, 17_889),
             extension_dir=str(self.extension_dir),
             detail="Bridge is listening.",
+        )
+
+    async def list_tabs(self) -> BrowserTabsResult:
+        """Return one deterministic tab listing without touching a real browser."""
+        return BrowserTabsResult(
+            tabs=(
+                BrowserTab(
+                    tab_id=1,
+                    window_id=1,
+                    url="https://example.com/article",
+                    title="Example",
+                    active=True,
+                ),
+            )
         )
 
     async def fetch(self, request: BrowserReadRequest) -> BrowserFetchPayload:

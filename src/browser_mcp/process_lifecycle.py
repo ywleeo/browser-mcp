@@ -50,7 +50,7 @@ def start_owner_watchdog(owner_pid: int | None = None) -> threading.Thread | Non
 
 def _watch_owner(owner_pid: int, server_pid: int) -> None:
     """Poll one immutable owner PID and signal this process after it disappears."""
-    while _process_exists(owner_pid):
+    while process_exists(owner_pid):
         time.sleep(OWNER_CHECK_INTERVAL_SECONDS)
     LOGGER.warning("process.owner_gone owner_pid=%s; stopping Browser MCP", owner_pid)
     try:
@@ -59,7 +59,7 @@ def _watch_owner(owner_pid: int, server_pid: int) -> None:
         pass
 
 
-def _process_exists(pid: int) -> bool:
+def process_exists(pid: int) -> bool:
     """Return whether a PID still exists without requiring permission to signal it."""
     try:
         os.kill(pid, 0)
@@ -68,6 +68,18 @@ def _process_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def process_start_time(pid: int) -> str:
+    """Read one process start time, which pins a PID to the exact process that claimed it.
+
+    A PID alone is not an identity: the kernel reuses it, and a command line is not an
+    identity either, because any process launched from a checkout named after this
+    project carries the project name in its own path. Pairing the PID with its start
+    time is what makes it safe to signal a process another server recorded earlier.
+    """
+    completed = _run_ps("lstart=", pid)
+    return "" if completed is None else " ".join(completed.stdout.split())
 
 
 def _process_name(pid: int) -> str:

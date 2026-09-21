@@ -303,11 +303,26 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 - 端口被占用：服务会自动尝试 `17880..17889`，以状态结果中的 `bridge_port` 为准。服务会
   监控跳过 `uv` 后的真实 MCP Host；Host 异常退出时自动释放监听端口，不需要 Agent 猜测并
   清理其他进程。
+- 端口池被闲置会话占满：不会发生。MCP Host 活着但早已不用 Browser MCP 的 server 会自己退场——
+  超过 `BROWSER_MCP_IDLE_TIMEOUT_SECONDS`（默认 3600 秒）没有任何 MCP 调用就退出并交还端口。
+  万一新会话启动时端口池仍然全满，它会回收其中闲置最久的那一个（需闲置超过
+  `BROWSER_MCP_RECLAIM_IDLE_SECONDS`，默认 300 秒），所以新会话总能起来。真的一个都回收不了时，
+  启动错误会直接列出占着每个端口的进程 PID、宿主 PID 和闲置时长，而不是只丢一句“端口已被占用”。
+  注意：扩展会同时连上池内每一个端口，所以“有没有连接”不代表“还在被使用”，判断依据只有真实的
+  MCP 调用。
+- 断连不会丢掉页面上的工作：MV3 service worker 休眠导致的短暂断开只释放 debugger 附着，
+  标签页与窗口保留，重连后继续沿用；只有 MCP server 主动停止，或同一端口超过 5 分钟没能重连，
+  才会回收窗口。
 - 扩展目录变化：以最新一次 `browser_status` 返回的 `extension_dir` 为准。
 - 不要分享 `pairing.json` 或 `pairing-token`，它们包含本地连接凭据。
 
 特殊进程监督器可以通过 `BROWSER_MCP_OWNER_PID` 显式传入宿主 PID；设置为 `0` 才会关闭
 宿主存活监控。普通 Codex、Claude 或命令行配置无需设置此变量。
+
+两个回收阈值同样可调：`BROWSER_MCP_IDLE_TIMEOUT_SECONDS` 控制闲置多久自行退场（设 `0` 关闭
+自退），`BROWSER_MCP_RECLAIM_IDLE_SECONDS` 控制端口池满时一个 server 至少要闲置多久才允许被
+新会话回收。回收只认「PID + 进程启动时间」完全匹配的目标，PID 被系统复用的进程只会被清掉过期
+记录，绝不会收到信号。
 
 ### MCP 能力
 
@@ -321,9 +336,10 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 | `browser_snapshot` | 网页操作 | 在共享当前登录态的后台 Chrome 窗口中打开网页，不切走用户当前页面；向 Agent 返回当前视口截图、可见文字以及带编号的按钮、链接、输入框等可操作元素。未提供网址时，可以观察当前页面。 |
 | `browser_click` | 网页操作 | 直接按当前截图中的像素坐标移动可信鼠标并点击；点击链路不遍历 DOM 或 iframe，最多读取坐标下最上层的第一个 hover 节点。`element_id` 仅作为已保存截图中心点的简写。截图坐标会按实际位图尺寸映射到 CSS 视口，也可显式传入 `coordinate_space=viewport`。操作后只返回新截图；继续语义操作前重新调用 `browser_snapshot`。 |
 | `browser_dialog` | 网页操作 | 处理 Chrome 原生 `alert`、`confirm`、`prompt` 和离开页面确认框。`accept` 接受（离开页面），`dismiss` 取消（留在当前页面）；关闭后自动返回全新截图和元素引用。若用户已按 Esc 关闭，调用它会安全刷新页面状态。 |
-| `browser_scroll` | 网页操作 | 向上、向下、向左或向右滚动网页，也可以把指定元素滚动到视口中。 |
+| `browser_scroll` | 网页操作 | 向上、向下、向左或向右滚动网页，也可以把指定元素滚动到视口中。滚轮落在截图坐标 `x`/`y` 上，传入面板、画布等可滚动区域内的一点即可滚动该区域而非整页；不传坐标则作用于视口中心。 |
+| `browser_tabs` | 网页操作 | 列出当前 Chrome 里打开的网页标签及其 id、网址与标题，用来找回此前打开的页面或确认标签还在。只读，不会切换或改动任何标签；只返回 http(s) 页面，浏览器内部页与扩展页不会返回。 |
 | `browser_type` | 网页操作 | 在输入框或可编辑区域填写、追加或替换文字，并返回填写后的页面状态；密码内容不会出现在元素信息中。 |
-| `browser_press` | 网页操作 | 执行 Enter、Escape、Tab、方向键、翻页键、Home、End 等常用键盘操作。 |
+| `browser_press` | 网页操作 | 执行 Enter、Escape、Tab、方向键、翻页键、Home、End 等常用键盘操作，走 Chrome 可信输入通道，因此 Tab 会真正移动焦点并触发表单提交值所需的 `change` 事件。 |
 | `browser_select` | 网页操作 | 在网页原生下拉选择框中选择选项，并返回选择后的页面状态。 |
 | `site_login_status` | 登录检查 | 查看当前 Chrome Profile 是否已登录知乎、小红书、抖音、X 或 Reddit；只检查会话状态，不执行平台任务，也不会返回 Cookie。 |
 | `zhihu_search` | 知乎 | 搜索知乎的综合内容、回答、文章或问题，获取标题、作者、摘要、互动数据和原始链接。 |

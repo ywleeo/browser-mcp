@@ -233,6 +233,22 @@ class BrowserClickRequest(BaseModel):
         return self
 
 
+class BrowserTab(BaseModel):
+    """One open webpage tab reported by the extension."""
+
+    tab_id: int
+    window_id: int
+    url: str
+    title: str = ""
+    active: bool = False
+
+
+class BrowserTabsResult(BaseModel):
+    """Every open http(s) tab in the paired Chrome profile."""
+
+    tabs: tuple[BrowserTab, ...] = ()
+
+
 class BrowserScrollDirection(StrEnum):
     """Supported relative page-scroll directions."""
 
@@ -243,12 +259,26 @@ class BrowserScrollDirection(StrEnum):
 
 
 class BrowserScrollRequest(BaseModel):
-    """Validated relative scroll or scroll-to-element request."""
+    """Validated relative scroll or scroll-to-element request.
+
+    The wheel is delivered at a viewport point so Chrome routes it to whichever
+    scroll container sits under it. Without x/y the page centre is used, which
+    scrolls the document on ordinary pages and the main pane on app-like ones.
+    """
 
     direction: BrowserScrollDirection = BrowserScrollDirection.DOWN
     amount: int = Field(default=600, ge=1, le=10_000)
     element_id: str | None = Field(default=None, min_length=1, max_length=32)
+    x: float | None = Field(default=None, ge=0, le=100_000)
+    y: float | None = Field(default=None, ge=0, le=100_000)
     wait_ms: int = Field(default=300, ge=0, le=30_000)
+
+    @model_validator(mode="after")
+    def _require_both_coordinates(self) -> BrowserScrollRequest:
+        """Reject a half-specified point, which would silently scroll the wrong container."""
+        if (self.x is None) != (self.y is None):
+            raise ValueError("scroll coordinates require both x and y")
+        return self
 
 
 class BrowserTypeRequest(BaseModel):

@@ -331,11 +331,30 @@ that didn't verify.
 - Port in use: the service auto-tries `17880..17889`; trust the `bridge_port` in the status result.
   It monitors the real MCP host behind `uv` and frees the listening port automatically when the host
   exits, so the agent doesn't have to guess at and kill other processes.
+- Pool exhausted by idle sessions: it can't happen. A server whose MCP host is alive but stopped
+  using Browser MCP retires itself once no MCP call has arrived for
+  `BROWSER_MCP_IDLE_TIMEOUT_SECONDS` (default 3600) and hands its port back. If a starting server
+  still finds every port taken, it reclaims the least recently used one (idle past
+  `BROWSER_MCP_RECLAIM_IDLE_SECONDS`, default 300), so a new session can always come up. When
+  nothing is reclaimable, the startup error names the PID, host PID, and idle time holding each
+  port instead of just saying the range is busy. Note that the extension connects to every pooled
+  port on its own, so socket presence says nothing about whether a server is still wanted -- only
+  real MCP traffic does.
+- A dropped connection no longer discards page state: the brief disconnect an MV3 service
+  worker causes when it sleeps only releases debugger attachments, keeping the tab and window
+  for the reconnect. The window is reclaimed only when the MCP server stops on purpose, or when
+  the same port stays unreachable for five minutes.
 - Changed extension dir: rely on the latest `extension_dir` from `browser_status`.
 - Never share `pairing.json` or `pairing-token`; they contain local connection credentials.
 
 A special process supervisor can take the host PID via `BROWSER_MCP_OWNER_PID`; set it to `0` only to
 disable host-liveness monitoring. Normal Codex, Claude, or CLI configs don't need this variable.
+
+Both reclamation thresholds are tunable too: `BROWSER_MCP_IDLE_TIMEOUT_SECONDS` sets how long a
+server may sit unused before retiring (`0` disables self-retirement), and
+`BROWSER_MCP_RECLAIM_IDLE_SECONDS` sets how long one must have been idle before a starting server
+may reclaim its port. Reclamation only targets a process whose PID *and* start time still match the
+recorded lease; a PID the kernel has reused loses the stale record and is never signalled.
 
 ### MCP tools
 
@@ -350,9 +369,10 @@ you don't need to fill in parameters by hand.
 | `browser_snapshot` | interact | Opens a page in a background Chrome window that shares the current login state, without leaving the user's page; returns a viewport screenshot, visible text, and numbered actionable elements (buttons, links, inputs). With no URL, observes the current page. |
 | `browser_click` | interact | Moves the trusted pointer and clicks directly at pixels chosen from the current screenshot. The click path traverses neither DOM nor iframes and samples at most the first topmost hover node. `element_id` is only shorthand for a center saved with that screenshot. Screenshot coords map to the CSS viewport; pass `coordinate_space=viewport` explicitly if needed. The action returns a fresh screenshot only; call `browser_snapshot` before another semantic action. |
 | `browser_dialog` | interact | Handles Chrome-native `alert`, `confirm`, `prompt`, and leave-page dialogs. `accept` confirms (and leaves for `beforeunload`); `dismiss` cancels and stays. It always returns a fresh screenshot and element map. If the user already pressed Escape, it safely refreshes visual state. |
-| `browser_scroll` | interact | Scrolls the page up/down/left/right, or brings a given element into view. |
+| `browser_scroll` | interact | Scrolls the page up/down/left/right, or brings a given element into view. The wheel lands at screenshot coordinates `x`/`y`, so a point inside a scrollable pane (an editor canvas, a settings panel) scrolls that pane instead of the page; without coordinates the viewport centre is used. |
+| `browser_tabs` | interact | Lists the open webpage tabs in this Chrome profile with their tab id, URL and title, to find a page opened earlier or confirm a tab is still open. Read-only: it never focuses or changes a tab, and only http(s) pages are returned — browser and extension pages never leave the extension. |
 | `browser_type` | interact | Fills, appends, or replaces text in an input or editable area and returns the resulting state; passwords never appear in the element info. |
-| `browser_press` | interact | Sends common keyboard actions: Enter, Escape, Tab, arrow keys, PageUp/Down, Home, End. |
+| `browser_press` | interact | Sends common keyboard actions: Enter, Escape, Tab, arrow keys, PageUp/Down, Home, End — through Chrome's trusted input pipeline, so Tab really moves focus and fires the `change` a framework-controlled field needs to commit its value. |
 | `browser_select` | interact | Picks an option in a native dropdown and returns the resulting state. |
 | `site_login_status` | login | Checks whether the current Chrome Profile is logged into Zhihu, Xiaohongshu, Douyin, X, or Reddit; only checks session state, runs no platform task, and returns no cookies. |
 | `zhihu_search` | Zhihu | Searches Zhihu's combined content, answers, articles, or questions; gets titles, authors, summaries, engagement data, and original links. |

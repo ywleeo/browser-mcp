@@ -2,6 +2,63 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.14.0] - 2026-09-21
+
+### 新增
+
+- 端口池不再会被闲置会话占满。此前只有宿主异常退出才回收端口（`process_lifecycle` 的宿主看门狗），
+  但真正吃满 `17880-17889` 的从来不是"宿主崩了"，而是"宿主还活着、这个会话早就不用 Browser MCP
+  了"——Claude Desktop、Codex 这类客户端一个会话对应一个常驻进程，闲置一整天也不退出，server 就
+  一直挂着端口。池子只有 10 个，这类残留只增不减，撞满是时间问题；撞满后新会话在 lifespan 里直接
+  抛 `RuntimeError`，stdio 随之断开，用户侧只看到一句 `CONNECTION_CLOSED`，完全无从判断。
+
+  现在每个 server 会为自己绑定的端口写一份租约（`data_dir/bridge-ports/bridge-<port>.json`，记录
+  PID、进程启动时间、宿主 PID 与最后一次真实 MCP 调用时间），并据此做两件事：
+
+  - **闲置自退**：超过 `BROWSER_MCP_IDLE_TIMEOUT_SECONDS`（默认 3600 秒）没有任何 MCP 调用，
+    server 主动交还租约并退出。设为 `0` 可关闭。
+  - **启动兜底回收**：新 server 发现端口池全满时，回收其中闲置最久的那一个（需闲置超过
+    `BROWSER_MCP_RECLAIM_IDLE_SECONDS`，默认 300 秒），随后重试绑定，保证新会话总能起来。
+    宿主已死却仍在运行的 server，以及进程早已消失的残留租约，无视闲置时长一律回收。
+
+  判断"还在被使用"只看真实 MCP 调用，不看连接：扩展本来就会同时连上池内每一个端口，socket 在不在
+  与这个 server 还有没有人用无关。
+
+- 新增 `browser_tabs`：列出当前 Chrome 里打开的网页标签及 id、网址、标题，用来找回此前打开的
+  页面或确认标签还在。只读，不切换、不改动任何标签；只返回 http(s) 页面，浏览器内部页与扩展页
+  不会离开扩展——它们透露的是使用者本人的信息，而不是任务信息。
+
+- `browser_press` 改走 Chrome 可信输入通道（CDP `Input.dispatchKeyEvent`），不再派发合成的
+  `KeyboardEvent`。此前 Tab 是"派发一个 `isTrusted: false` 的事件，再手动 `next.focus()`"，
+  浏览器不会为合成事件执行自己的默认行为，输入框失焦时该派发的 `change` 也就没走完——
+  于是 React/Vue 这类受控表单里，值停在 DOM 上进不了组件，UI 显示新值而实际未生效，
+  是**静默失败**。Enter 的旧实现更糟：不在 `<form>` 里就对目标元素调 `click()`，
+  这不是按 Enter 的语义。现在按键由浏览器自己处理，焦点移动、表单提交、值提交都和真人一致。
+- `browser_scroll` 改用落在坐标上的 CDP 滚轮事件（`Input.dispatchMouseEvent` / `mouseWheel`），
+  不再只调 `window.scrollBy`。此前任何在元素内滚动的页面——编辑器画布、设置面板、虚拟列表——
+  都纹丝不动。新增可选的 `x`/`y`：滚轮落在该点，Chrome 自然把它路由给那个点下面的滚动容器，
+  与真实滚轮一致；不传坐标则作用于视口中心。`element_id` 仍走 `scrollIntoView`。
+
+### 修复
+
+- 意外断连不再销毁交互窗口，页面里没保存的东西不会再凭空消失。根因是
+  `cleanupBridgeSessionsForPort` 里的 `chrome.windows.remove`——这个完整清理被
+  `socket.onclose` 无条件调用，而关闭的 socket 通常并不代表 server 停了：MV3 service worker
+  闲置几十秒就休眠，随后自己重连。于是只要 agent 停下来问用户一句话，正在编辑的表单、
+  填了一半的落地页就连窗口一起没了，重连后只剩一个找不回原页面的会话。
+  现在两种断开分开处理：收到 `bridge.shutdown`（server 主动停止）立即完整清理；socket 意外
+  关闭只释放 debugger 附着与在途队列——它们不能悬空——标签页和窗口绑定一律保留，同一端口
+  重新服务时继续沿用。只有在宽限期（5 分钟）内始终没能重连，才由 alarm 回收那个窗口。
+
+- 端口池耗尽的报错不再只说范围。启动失败信息现在直接列出占着每个端口的进程 PID、宿主 PID 和闲置
+  时长，用户不必翻 stderr 也知道该退出哪个客户端。
+
+### 安全
+
+- 回收只向"PID 与进程启动时间都与租约完全一致"的进程发信号。仅凭 PID 判断会误杀被系统复用的进程，
+  而仅凭命令行匹配同样不安全——任何从名为 `browser-mcp` 的目录里启动的进程（含本仓库的 `pytest`）
+  路径中都带着这个名字。身份存疑时只清理过期租约，绝不发信号。
+
 ## [0.13.4] - 2026-09-14
 
 ### 修复

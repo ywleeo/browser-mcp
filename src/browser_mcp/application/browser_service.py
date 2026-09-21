@@ -19,6 +19,7 @@ from browser_mcp.models import (
     BrowserSelectRequest,
     BrowserSnapshotRequest,
     BrowserStatus,
+    BrowserTabsResult,
     BrowserTypeRequest,
     BrowserVisualResult,
     SnapshotPageRequest,
@@ -57,6 +58,10 @@ class BrowserBridge(Protocol):
         """Execute one allowlisted namespaced extension adapter action."""
         ...
 
+    async def list_tabs(self) -> BrowserTabsResult:
+        """Return every open webpage tab in the paired browser profile."""
+        ...
+
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Execute one visual browser interaction and return the resulting page state."""
         ...
@@ -93,6 +98,10 @@ class BrowserService:
     async def status(self) -> BrowserStatus:
         """Return live extension bridge installation and connection diagnostics."""
         return await self._bridge.status()
+
+    async def list_tabs(self) -> BrowserTabsResult:
+        """Return the open webpage tabs so an agent can resume work left in another tab."""
+        return await self._bridge.list_tabs()
 
     async def read(self, request: BrowserReadRequest) -> BrowserReadResult:
         """Validate, fetch, extract, snapshot, and return the first bounded page."""
