@@ -30,6 +30,7 @@ from browser_mcp.models import (
     BrowserStatus,
     BrowserTabsResult,
     BrowserTypeRequest,
+    BrowserUploadRequest,
     BrowserVisualResult,
     ExtractMode,
     SnapshotPageRequest,
@@ -161,6 +162,9 @@ def create_server(
             "When a result contains dialog metadata, call browser_dialog before another page "
             "action. If a stale action is skipped and refreshed, retry only with coordinates or "
             "references from that fresh result. "
+            "To upload a file, call browser_upload instead of clicking the upload control: "
+            "clicking it opens an OS file picker that no browser tool can drive, while "
+            "browser_upload writes the file straight into the page's file input. "
             "Ask for explicit user confirmation immediately before actions that publish, "
             "send, purchase, delete, or otherwise cause consequential external side effects. "
             "Use the "
@@ -302,6 +306,21 @@ def create_server(
         """Select one native option by exact value or visible label."""
         request = BrowserSelectRequest(element_id=element_id, value=value, wait_ms=wait_ms)
         return _visual_tool_result(await browser_service.select(request))
+
+    async def _browser_upload(
+        paths: list[str],
+        element_id: str | None = None,
+        index: int | None = None,
+        wait_ms: int = 800,
+    ) -> CallToolResult:
+        """Attach local files to one file input without opening a native picker."""
+        request = BrowserUploadRequest(
+            paths=tuple(paths),
+            element_id=element_id,
+            index=index,
+            wait_ms=wait_ms,
+        )
+        return _visual_tool_result(await browser_service.upload(request))
 
     async def _site_login_status(platform: SitePlatform) -> SiteLoginStatus:
         """Check one platform login state without executing the requested platform task."""
@@ -714,6 +733,31 @@ def create_server(
         description=(
             "Choose a native select option by its exact value or visible label, then return "
             "the new visual state."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    )
+    server.add_tool(
+        _browser_upload,
+        name="browser_upload",
+        description=(
+            "Attach local files to a file input on the current page and return the new "
+            "visual state. Chrome reads the paths directly, so no native file picker "
+            "opens and none has to be driven. Never click an upload control yourself to "
+            "start an upload: that opens the OS file dialog, which no browser tool can "
+            "fill or close. Most upload buttons hide their real file input, which keeps "
+            "it out of browser_snapshot, so call this WITHOUT element_id first: when the "
+            "page has exactly one file input it is used. If several exist the error lists "
+            "every candidate with its index, accept filter, and nearby label; retry with "
+            "that index. Pass element_id when the page has no file input yet because the "
+            "widget creates one on click, or to scope the search to one visible upload "
+            "button: that control is then clicked with Chrome's file chooser intercepted, "
+            "so the dialog never appears. Paths must be readable regular files; "
+            "credential directories and dotfiles are refused."
         ),
         annotations=ToolAnnotations(
             read_only_hint=False,

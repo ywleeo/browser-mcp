@@ -50,7 +50,7 @@ state to get the platform's own data.
 
 - **Search directly inside the real platforms**: Zhihu, Xiaohongshu, X, Douyin, Bilibili, Reddit — with your logged-in state, getting the platforms' own data, not your agent's built-in search.
 - **Read any page**: article body, visible text, JS-rendered content, data returned by page requests, and content that's **only visible after login**.
-- **Drive a page in the background**: get a screenshot plus numbered actionable elements in a background Chrome window, then keep clicking, scrolling, typing, pressing keys, and selecting options — without leaving the tab you're on.
+- **Drive a page in the background**: get a screenshot plus numbered actionable elements in a background Chrome window, then keep clicking, scrolling, typing, pressing keys, selecting options, and **uploading files** — without leaving the tab you're on.
 - **Zhihu**: search, questions, answers, articles, answer invitations.
 - **Xiaohongshu**: search, an account's posts, note details, **full comments (resumable)**, like/collect, image & video download.
 - **Douyin**: search, video/image-post details, **full comments (resumable)**, like/collect, image & video download.
@@ -59,7 +59,7 @@ state to get the platform's own data.
 - **Reddit**: post search, post details, comments.
 - **Search**: Google, Bing, Sogou.
 
-Current version is `0.12.1`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current version is `0.15.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 Final actions that affect external state — like, collect, publish, send, buy, delete — should be
 confirmed with the user before executing. The extension uses the current Chrome Profile's login
@@ -114,7 +114,7 @@ A successful connection returns:
   "state": "connected",
   "connected": true,
   "bridge_port": 17880,
-  "server_version": "0.12.1",
+  "server_version": "0.15.0",
   "install_mode": "source",
   "project_root": "/path/to/browser-mcp",
   "source_commit": "<git-commit>",
@@ -252,8 +252,9 @@ an arbitrary Git repo.
 
 - `<all_urls>`: to open public HTTP(S) pages explicitly requested by the caller, and to support the
   per-site adapters. It never crawls browsing history on its own.
-- `debugger`: to capture page request responses and to send trusted browser input events in comment
-  streams and visual interaction.
+- `debugger`: to capture page request responses, to send trusted browser input events in comment
+  streams and visual interaction, and to write local files straight into a page's file input
+  without the OS file picker opening.
 - `tabs`, `scripting`: to manage isolated background tabs and run the bundled, fixed extraction scripts.
 - `storage`, `alarms`: for local pairing config and MV3 service-worker keep-alive.
 
@@ -374,6 +375,7 @@ you don't need to fill in parameters by hand.
 | `browser_type` | interact | Fills, appends, or replaces text in an input or editable area and returns the resulting state; passwords never appear in the element info. |
 | `browser_press` | interact | Sends common keyboard actions: Enter, Escape, Tab, arrow keys, PageUp/Down, Home, End — through Chrome's trusted input pipeline, so Tab really moves focus and fires the `change` a framework-controlled field needs to commit its value. |
 | `browser_select` | interact | Picks an option in a native dropdown and returns the resulting state. |
+| `browser_upload` | interact | Attach local files to a file input on the page and return the resulting state. Chrome reads the paths itself, so no native file picker opens and none has to be driven — **never click an upload control to start an upload**, as that opens the OS dialog no browser tool can fill or close. Most upload buttons hide their real `input[type=file]`, which keeps it out of `browser_snapshot`, so call this without `element_id` first: a page with exactly one file input uses it automatically, and when several exist the error lists every candidate with its index, accept filter, and nearby label so you can retry with `index`. Pass `element_id` when the page has no file input yet because the widget creates one on click, or to scope the search to one visible upload button: the control is then clicked with Chrome's file chooser intercepted, so the dialog never appears and Chrome hands over the freshly created input. Paths must be readable regular files; credential directories and sensitive dotfiles are refused. |
 | `site_login_status` | login | Checks whether the current Chrome Profile is logged into Zhihu, Xiaohongshu, Douyin, X, or Reddit; only checks session state, runs no platform task, and returns no cookies. |
 | `zhihu_search` | Zhihu | Searches Zhihu's combined content, answers, articles, or questions; gets titles, authors, summaries, engagement data, and original links. |
 | `zhihu_content` | Zhihu | Reads the body of a Zhihu question, answer, or article — good for summarizing, extracting opinions, or deeper analysis. |

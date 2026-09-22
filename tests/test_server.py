@@ -40,6 +40,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "browser_type",
         "browser_press",
         "browser_select",
+        "browser_upload",
         "site_login_status",
         "zhihu_search",
         "zhihu_content",

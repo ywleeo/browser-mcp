@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-browser-mcp"
-version = "0.14.0"
+version = "0.15.0"
 description = "Local MCP server for reading and interacting with web pages through real Chrome."
 readme = "README.en.md"
 requires-python = ">=3.12"
@@ -41,6 +41,7 @@ packages = ["src/browser_mcp"]
 "extension/content_inject.js" = "browser_mcp/extension/content_inject.js"
 "extension/douyin_content_bridge.js" = "browser_mcp/extension/douyin_content_bridge.js"
 "extension/douyin_content_inject.js" = "browser_mcp/extension/douyin_content_inject.js"
+"extension/interaction_upload.js" = "browser_mcp/extension/interaction_upload.js"
 "extension/manifest.json" = "browser_mcp/extension/manifest.json"
 "extension/options.html" = "browser_mcp/extension/options.html"
 "extension/options.js" = "browser_mcp/extension/options.js"

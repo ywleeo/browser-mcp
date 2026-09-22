@@ -2,6 +2,44 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)维护版本号。
 
+## [0.15.0] - 2026-09-22
+
+### 新增
+
+- 新增 `browser_upload`，补上此前唯一无法自动化的交互：文件上传。以前碰到 `input[type=file]`
+  只能点一下上传按钮，然后被 macOS/Windows 的原生文件选择框挡死——那是浏览器之外的系统 UI，
+  扩展和 CDP 都够不着，整条链路到此为止，只能让用户自己接手。
+
+  现在走 CDP 的 `DOM.setFileInputFiles`：Chrome 按路径自己读文件，原生选择框根本不会弹出，
+  也就不存在"怎么操作它"的问题。因为 server 和 Chrome 本来就在同一台机器上，路径直接传即可，
+  不需要把文件编码后塞进协议。
+
+  真正的难点是定位目标输入框。真实站点几乎都把 `input[type=file]` 藏在一个好看的按钮背后
+  （`display:none`、`opacity:0` 或 1×1 像素），而 `browser_snapshot` 按可见性过滤元素，这类
+  输入框永远拿不到 `element_id`。所以 `browser_upload` 不依赖快照引用，自己遍历所有可注入
+  frame（含 shadow DOM）收集文件输入框，且刻意不做可见性过滤：
+
+  - 页面只有一个时直接使用；
+  - 有多个时报错列出每个候选的序号、accept 限制、邻近文字与可见性，据此带 `index` 重试；
+  - 传 `element_id` 则把范围限定到某个可见的上传按钮，依次向其内部、`label[for]` 关联、最多
+    三层祖先查找它背后的隐藏输入框。
+
+  还有一类上传控件在页面上根本找不到输入框：它在 onclick 里才 `createElement('input')`，有的
+  甚至不插进 DOM。对这类控件，传 `element_id` 指向那个按钮，`browser_upload` 会先打开
+  `Page.setInterceptFileChooserDialog`，再可信点击它——系统文件框被拦下不会弹出，Chrome 转而通过
+  `Page.fileChooserOpened` 交出那个刚被创建的输入框的 `backendNodeId`，照常写入文件。拦截在任何
+  结果下都会在 `finally` 里关掉：它开着的时候用户自己点上传按钮也弹不出选择框，泄漏出去等于悄悄
+  弄坏人家的页面。
+
+  仍然无解的只剩两种：页面用 File System Access API (`showOpenFilePicker`) 时，文件句柄不经过任何
+  input 元素，拦截事件里没有 `backendNodeId`，此时工具会明确报错说明只能由用户自己选；以及只支持
+  拖放、完全没有文件输入框的区域。
+
+  路径在进入扩展之前先过 `LocalFilePolicy`：必须是解析软链之后仍然存在的可读普通文件，受单文件
+  64 MB、总量 128 MB、最多 10 个文件的限制，并拒绝 `.ssh`、`.aws`、`.gnupg`、`.kube` 等凭据目录
+  与 `.env`、`id_rsa`、`.netrc` 等敏感文件。这条边界是必要的：Chrome 是自己去磁盘读文件的，
+  被注入的页面不该有机会诱导 agent 把凭据上传出去。软链按目标判定，避免绕过。
+
 ## [0.14.0] - 2026-09-21
 
 ### 新增

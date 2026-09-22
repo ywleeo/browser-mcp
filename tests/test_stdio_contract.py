@@ -50,6 +50,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
                 "browser_type",
                 "browser_press",
                 "browser_select",
+                "browser_upload",
                 "site_login_status",
                 "zhihu_search",
                 "zhihu_content",

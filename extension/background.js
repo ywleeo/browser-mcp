@@ -10,6 +10,7 @@ import {
   forgetBackgroundTab,
   openBackgroundTab,
 } from "./background_tabs.js";
+import { executeUpload } from "./interaction_upload.js";
 import {
   SWEEP_ALARM_NAME,
   closeCommentSessionsForPort,
@@ -836,6 +837,11 @@ async function dispatchBrowserTabs(state, message) {
   }
 }
 
+/** Visual actions this worker accepts; kept in sync with INTERACTION_ACTIONS server-side. */
+const INTERACTION_ACTIONS = [
+  "snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload",
+];
+
 /** Execute one visual action and always return the resulting screenshot and element map. */
 async function dispatchBrowserInteraction(state, message) {
   const action = String(message.action || "");
@@ -843,7 +849,7 @@ async function dispatchBrowserInteraction(state, message) {
   const session = `${state.port}:${String(message.tab_id || "default")}`;
   const reply = (payload) =>
     sendJson(state, { type: "browser.interact.result", id: message.id, ...payload });
-  if (!["snapshot", "click", "dialog", "scroll", "type", "press", "select"].includes(action)) {
+  if (!INTERACTION_ACTIONS.includes(action)) {
     reply({ ok: false, error: `unsupported browser interaction action: ${action}` });
     return;
   }
@@ -1451,9 +1457,25 @@ async function executeInteractionAction(tabId, action, args, debuggerTarget, cli
     await executeTrustedPress(tabId, String(args.key || ""), args.element_id || null, debuggerTarget);
     return;
   }
+  if (action === "upload") {
+    const frames = await listInjectableInteractionFrames(debuggerTarget);
+    await executeUpload(debuggerTarget, args, frames);
+    return;
+  }
   if (action === "select") {
     await executeSelect(tabId, String(args.element_id || ""), String(args.value || ""));
   }
+}
+
+/** List the webpage frames an interaction script may enter, browser-owned ones excluded. */
+async function listInjectableInteractionFrames(debuggerTarget) {
+  if (!debuggerTarget) return [];
+  const { frameTree } = await chrome.debugger.sendCommand(
+    debuggerTarget,
+    "Page.getFrameTree",
+    {},
+  );
+  return flattenInteractionFrameTree(frameTree).filter(interactionFrameIsInjectable);
 }
 
 /** Return whether one frame is a webpage rather than a browser or password-manager extension. */

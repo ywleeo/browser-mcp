@@ -324,3 +324,12 @@ class BrowserSelectRequest(BaseModel):
     element_id: str = Field(min_length=1, max_length=32)
     value: str = Field(min_length=1, max_length=10_000)
     wait_ms: int = Field(default=300, ge=0, le=30_000)
+
+
+class BrowserUploadRequest(BaseModel):
+    """Validated local-file request targeted at one file input on the current page."""
+
+    paths: tuple[str, ...] = Field(min_length=1, max_length=10)
+    element_id: str | None = Field(default=None, min_length=1, max_length=32)
+    index: int | None = Field(default=None, ge=0, le=100)
+    wait_ms: int = Field(default=800, ge=0, le=30_000)

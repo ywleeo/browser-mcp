@@ -125,6 +125,7 @@ class ExtensionBundle:
                 "content_inject.js",
                 "douyin_content_bridge.js",
                 "douyin_content_inject.js",
+                "interaction_upload.js",
                 "manifest.json",
                 "options.html",
                 "options.js",

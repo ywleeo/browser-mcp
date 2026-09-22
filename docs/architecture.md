@@ -261,6 +261,7 @@ browser-mcp/
 │   ├── douyin_content_bridge.js
 │   ├── comment_sessions.js     # 可续抓评论采集会话的生命周期与持久化
 │   ├── background_tabs.js      # 只读标签页的唯一入口，负责登记与断线回收
+│   ├── interaction_upload.js   # CDP 文件上传：绕开原生选择框，定位隐藏的 file input
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化
@@ -276,7 +277,7 @@ browser-mcp/
 │   │   ├── xhs.py
 │   │   ├── media.py            # 共享安全下载边界，不包含站点解析
 │   │   └── ...
-│   └── security/               # URL policy、pairing token、redaction
+│   └── security/               # URL policy、本地文件上传策略、pairing token、redaction
 └── tests/
     ├── fixtures/
     ├── test_stdio_contract.py

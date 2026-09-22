@@ -203,3 +203,18 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
         pairing_mode = (first.directory / "pairing.json").stat().st_mode & 0o777
         assert token_mode == 0o600
         assert pairing_mode == 0o600
+
+
+def test_extension_and_server_gate_the_same_interaction_actions() -> None:
+    """Both layers hold their own allowlist, so a new action must be wired into each."""
+    import re
+
+    from browser_mcp.bridge.manager import INTERACTION_ACTIONS
+
+    background = Path(__file__).resolve().parents[1] / "extension" / "background.js"
+    declaration = re.search(
+        r"const INTERACTION_ACTIONS = \[(.*?)\];", background.read_text(), re.DOTALL
+    )
+
+    assert declaration is not None, "extension must declare INTERACTION_ACTIONS"
+    assert set(re.findall(r'"([a-z_]+)"', declaration.group(1))) == set(INTERACTION_ACTIONS)

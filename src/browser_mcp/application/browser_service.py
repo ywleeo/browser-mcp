@@ -21,10 +21,11 @@ from browser_mcp.models import (
     BrowserStatus,
     BrowserTabsResult,
     BrowserTypeRequest,
+    BrowserUploadRequest,
     BrowserVisualResult,
     SnapshotPageRequest,
 )
-from browser_mcp.security import PublicUrlPolicy
+from browser_mcp.security import LocalFilePolicy, PublicUrlPolicy
 from browser_mcp.snapshot import SnapshotStore
 
 
@@ -76,11 +77,13 @@ class BrowserService:
         bridge: BrowserBridge | None = None,
         url_policy: PublicUrlPolicy | None = None,
         snapshots: SnapshotStore | None = None,
+        upload_policy: LocalFilePolicy | None = None,
     ) -> None:
         """Create the service from validated process settings."""
         self._url_policy = url_policy or PublicUrlPolicy()
         self._bridge = bridge or BridgeManager(settings, self._url_policy)
         self._snapshots = snapshots or SnapshotStore()
+        self._upload_policy = upload_policy or LocalFilePolicy()
 
     @property
     def gateway(self) -> BrowserBridge:
@@ -178,6 +181,14 @@ class BrowserService:
     async def select(self, request: BrowserSelectRequest) -> BrowserVisualResult:
         """Choose one native select option by value or label."""
         return await self._interact("select", request.model_dump())
+
+    async def upload(self, request: BrowserUploadRequest) -> BrowserVisualResult:
+        """Attach authorized local files to one file input without a native picker."""
+        args = request.model_dump()
+        # Resolve before dispatching: Chrome reads these paths itself, so an
+        # unauthorized one must never reach the extension in the first place.
+        args["paths"] = list(self._upload_policy.resolve(request.paths))
+        return await self._interact("upload", args)
 
     async def _interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Dispatch one interaction and reject any non-public resulting page URL."""

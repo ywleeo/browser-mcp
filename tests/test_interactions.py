@@ -19,8 +19,10 @@ from browser_mcp.models import (
     BrowserSelectRequest,
     BrowserSnapshotRequest,
     BrowserTypeRequest,
+    BrowserUploadRequest,
     BrowserViewport,
 )
+from browser_mcp.security import UploadPolicyError
 from tests.helpers import FakeBridge, allow_public_url_policy
 
 
@@ -87,6 +89,9 @@ async def test_browser_service_dispatches_every_visual_action_with_typed_argumen
     await service.type_text(BrowserTypeRequest(element_id="e1", text="Browser MCP"))
     await service.press(BrowserPressRequest(key=BrowserPressKey.ENTER))
     await service.select(BrowserSelectRequest(element_id="e2", value="中文"))
+    poster = tmp_path / "poster.png"
+    poster.write_bytes(b"png-bytes")
+    await service.upload(BrowserUploadRequest(paths=(str(poster),)))
 
     assert snapshot.state.elements[0].name == "Search"
     assert [action for action, _args in bridge.interactions] == [
@@ -97,11 +102,13 @@ async def test_browser_service_dispatches_every_visual_action_with_typed_argumen
         "type",
         "press",
         "select",
+        "upload",
     ]
     assert bridge.interactions[3][1]["direction"] == "down"
     assert bridge.interactions[1][1]["coordinate_space"] == "screenshot"
     assert bridge.interactions[2][1]["action"] == "dismiss"
     assert bridge.interactions[5][1]["key"] == "Enter"
+    assert bridge.interactions[7][1]["paths"] == [str(poster.resolve())]
 
 
 def test_dialog_request_validates_native_decisions() -> None:
@@ -126,3 +133,23 @@ def test_scroll_request_targets_a_container_through_a_complete_point() -> None:
         BrowserScrollRequest(x=640)
     with pytest.raises(ValidationError, match="require both x and y"):
         BrowserScrollRequest(y=480)
+
+
+@pytest.mark.asyncio
+async def test_upload_policy_runs_before_the_extension_is_reached(tmp_path: Path) -> None:
+    """A refused path must never be dispatched, because Chrome itself reads the file."""
+    bridge = FakeBridge(tmp_path / "extension")
+    service = BrowserService(
+        AppSettings(data_dir=tmp_path),
+        bridge=bridge,
+        url_policy=allow_public_url_policy(),
+    )
+    secrets = tmp_path / ".ssh"
+    secrets.mkdir()
+    key = secrets / "id_rsa"
+    key.write_text("private")
+
+    with pytest.raises(UploadPolicyError):
+        await service.upload(BrowserUploadRequest(paths=(str(key),)))
+
+    assert bridge.interactions == []
