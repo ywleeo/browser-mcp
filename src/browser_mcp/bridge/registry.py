@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
-from browser_mcp.process_lifecycle import process_exists, process_start_time
+from browser_mcp.process_lifecycle import process_is_running, process_start_time
 
 LOGGER = logging.getLogger(__name__)
 LEASE_DIR_NAME: Final = "bridge-ports"
@@ -224,7 +224,7 @@ class PortRegistry:
             return True
         deadline = time.monotonic() + TERMINATION_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
-            if not process_exists(lease.pid):
+            if not process_is_running(lease.pid):
                 self._remove(lease.port)
                 return True
             time.sleep(TERMINATION_POLL_SECONDS)
@@ -281,7 +281,7 @@ def _is_recorded_server(lease: PortLease) -> bool:
     stale. The lease is then dropped without signalling anyone, because reclaiming a
     port is never worth the risk of terminating a process that merely inherited a PID.
     """
-    if not process_exists(lease.pid) or not lease.pid_start_time:
+    if not process_is_running(lease.pid) or not lease.pid_start_time:
         return False
     return process_start_time(lease.pid) == lease.pid_start_time
 
@@ -289,7 +289,7 @@ def _is_recorded_server(lease: PortLease) -> bool:
 def _owner_is_gone(lease: PortLease) -> bool:
     """Return whether the MCP host that launched a still-running server has exited."""
     owner_pid = lease.owner_pid
-    return owner_pid is not None and not process_exists(owner_pid)
+    return owner_pid is not None and not process_is_running(owner_pid)
 
 
 def _parse_moment(raw: str) -> datetime:

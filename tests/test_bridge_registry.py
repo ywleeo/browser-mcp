@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +16,12 @@ import pytest
 from browser_mcp.bridge.manager import BridgeManager
 from browser_mcp.bridge.registry import PortLease, PortRegistry
 from browser_mcp.config import AppSettings
-from browser_mcp.process_lifecycle import OWNER_PID_ENV, process_start_time
+from browser_mcp.process_lifecycle import (
+    OWNER_PID_ENV,
+    process_exists,
+    process_is_running,
+    process_start_time,
+)
 from tests.helpers import allow_public_url_policy, reserve_free_port
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -102,6 +108,28 @@ def unused_pid() -> int:
         except PermissionError:
             continue
     raise RuntimeError("no free PID for the crashed-server fixture")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="zombie reaping is a POSIX concept")
+def test_an_unreaped_zombie_does_not_count_as_a_running_process() -> None:
+    """A dead child still in the process table has already released its port.
+
+    `os.kill(pid, 0)` keeps succeeding until the parent reaps it, so liveness has
+    to look at the process state. Otherwise reclamation waits out its timeout and
+    reports a failure for a port the kernel freed when the process died.
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - the child never returns to pytest
+        os._exit(0)
+    try:
+        for _ in range(50):
+            if process_exists(pid) and not process_is_running(pid):
+                break
+            time.sleep(0.05)
+        assert process_exists(pid), "the zombie should still occupy its PID"
+        assert not process_is_running(pid), "a zombie must not be treated as alive"
+    finally:
+        os.waitpid(pid, 0)
 
 
 def test_lease_survives_a_storage_round_trip(tmp_path: Path) -> None:

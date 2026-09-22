@@ -49,7 +49,12 @@ def start_owner_watchdog(owner_pid: int | None = None) -> threading.Thread | Non
 
 
 def _watch_owner(owner_pid: int, server_pid: int) -> None:
-    """Poll one immutable owner PID and signal this process after it disappears."""
+    """Poll one immutable owner PID and signal this process after it disappears.
+
+    This deliberately uses the cheap `process_exists` rather than the zombie-aware
+    `process_is_running`: it runs every couple of seconds for the life of the
+    server, and noticing a reaped-late host one poll later costs nothing.
+    """
     while process_exists(owner_pid):
         time.sleep(OWNER_CHECK_INTERVAL_SECONDS)
     LOGGER.warning("process.owner_gone owner_pid=%s; stopping Browser MCP", owner_pid)
@@ -68,6 +73,24 @@ def process_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def process_is_running(pid: int) -> bool:
+    """Return whether a PID is a live process rather than an unreaped zombie.
+
+    A terminated child stays in the process table until its parent reaps it, and
+    `os.kill(pid, 0)` keeps succeeding for that zombie even though the process is
+    gone and the kernel has already released everything it held -- including its
+    listening socket. Treating a zombie as alive makes reclamation wait out its
+    timeout and then report a failure for a port that is, in fact, free.
+    """
+    if not process_exists(pid):
+        return False
+    completed = _run_ps("state=", pid)
+    if completed is None:
+        return False
+    state = completed.stdout.strip()
+    return bool(state) and not state.startswith("Z")
 
 
 def process_start_time(pid: int) -> str:
