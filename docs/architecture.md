@@ -262,6 +262,7 @@ browser-mcp/
 │   ├── comment_sessions.js     # 可续抓评论采集会话的生命周期与持久化
 │   ├── background_tabs.js      # 只读标签页的唯一入口，负责登记与断线回收
 │   ├── interaction_upload.js   # CDP 文件上传：绕开原生选择框，定位隐藏的 file input
+│   ├── zhihu_api.js           # 知乎 API 读取：吸收未就绪标签引发的瞬时 10003 拒绝
 │   └── options.*
 ├── src/browser_mcp/
 │   ├── __main__.py             # 进程入口；stdio 与日志初始化

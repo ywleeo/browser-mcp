@@ -12,6 +12,12 @@ import {
 } from "./background_tabs.js";
 import { executeUpload } from "./interaction_upload.js";
 import {
+  ZHIHU_FETCH_ATTEMPTS,
+  ZHIHU_RETRY_BACKOFF_MS,
+  nextInvitationsPage,
+  zhihuApiFetch,
+} from "./zhihu_api.js";
+import {
   SWEEP_ALARM_NAME,
   closeCommentSessionsForPort,
   closeCommentSession,
@@ -2279,23 +2285,16 @@ async function runZhihuSearch(state, args, reply) {
     const [{ result } = {}] = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      args: [endpoint.toString()],
-      func: async (url) => {
-        try {
-          const response = await fetch(url, {
-            credentials: "include",
-            headers: { Accept: "application/json, text/plain, */*" },
-          });
-          const body = await response.text();
-          if (!response.ok) return { error: `HTTP ${response.status}: ${body.slice(0, 300)}` };
-          return { data: JSON.parse(body) };
-        } catch (error) {
-          return { error: String(error?.message || error) };
-        }
-      },
+      args: [endpoint.toString(), ZHIHU_FETCH_ATTEMPTS, ZHIHU_RETRY_BACKOFF_MS],
+      func: zhihuApiFetch,
     });
     if (!result || result.error) {
       throw new Error(result?.error || "Zhihu search script returned no data");
+    }
+    if (Number(result.attempts) > 1) {
+      console.debug("[browser-mcp-extension] zhihu search recovered by retry", {
+        attempts: result.attempts,
+      });
     }
     reply({ ok: true, data: result.data });
   } catch (error) {
@@ -2324,55 +2323,39 @@ async function runZhihuInvitations(state, args, reply) {
     tabId = tab.id;
     if (tabId == null) throw new Error("Chrome did not create a Zhihu invitations tab");
     await waitForTabComplete(tabId);
-    const [{ result } = {}] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      args: [endpoint.toString(), startTimestamp, maxPages],
-      func: async (initialUrl, requestedStart, pageLimit) => {
-        const pages = [];
-        let currentUrl = initialUrl;
-        let complete = false;
-        let nextOffset = null;
-        try {
-          for (let pageNumber = 0; pageNumber < pageLimit; pageNumber += 1) {
-            const response = await fetch(currentUrl, {
-              credentials: "include",
-              headers: { Accept: "application/json, text/plain, */*" },
-            });
-            const body = await response.text();
-            if (!response.ok) return { error: `HTTP ${response.status}: ${body.slice(0, 300)}` };
-            const payload = JSON.parse(body);
-            pages.push(payload);
-            const records = Array.isArray(payload?.data) ? payload.data : [];
-            const timestamps = records
-              .map((record) => Number(record?.create_time) || 0)
-              .filter((timestamp) => timestamp > 0);
-            if (timestamps.length && Math.min(...timestamps) < requestedStart) {
-              complete = true;
-              break;
-            }
-            if (payload?.paging?.is_end === true) {
-              complete = true;
-              break;
-            }
-            const next = new URL(String(payload?.paging?.next || ""), initialUrl);
-            const offset = next.searchParams.get("offset");
-            if (!offset || !/^\d+$/.test(offset)) break;
-            nextOffset = offset;
-            const generated = new URL(initialUrl);
-            generated.searchParams.set("offset", offset);
-            currentUrl = generated.toString();
-          }
-          return { data: { pages, complete, next_offset: nextOffset } };
-        } catch (error) {
-          return { error: String(error?.message || error) };
-        }
-      },
-    });
-    if (!result || result.error) {
-      throw new Error(result?.error || "Zhihu invitations script returned no data");
+    // One injected fetch per page, so every page gets its own retry budget rather than the
+    // whole walk dying on a single transient rejection.
+    const initialUrl = endpoint.toString();
+    const pages = [];
+    let currentUrl = initialUrl;
+    let complete = false;
+    let nextOffset = null;
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      const [{ result } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [currentUrl, ZHIHU_FETCH_ATTEMPTS, ZHIHU_RETRY_BACKOFF_MS],
+        func: zhihuApiFetch,
+      });
+      if (!result || result.error) {
+        throw new Error(result?.error || "Zhihu invitations script returned no data");
+      }
+      if (Number(result.attempts) > 1) {
+        console.debug("[browser-mcp-extension] zhihu invitations page recovered by retry", {
+          page: pageNumber,
+          attempts: result.attempts,
+        });
+      }
+      pages.push(result.data);
+      const step = nextInvitationsPage(result.data, initialUrl, startTimestamp);
+      if (step.done) {
+        complete = step.complete;
+        break;
+      }
+      nextOffset = step.offset;
+      currentUrl = step.url;
     }
-    reply({ ok: true, data: result.data });
+    reply({ ok: true, data: { pages, complete, next_offset: nextOffset } });
   } catch (error) {
     reply({ ok: false, error: String(error?.message || error) });
   } finally {

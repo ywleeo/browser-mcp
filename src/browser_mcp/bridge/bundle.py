@@ -129,6 +129,7 @@ class ExtensionBundle:
                 "manifest.json",
                 "options.html",
                 "options.js",
+                "zhihu_api.js",
             )
             if all((source_dir / name).is_file() for name in source_names):
                 return [(Path(name), (source_dir / name).read_bytes()) for name in source_names]

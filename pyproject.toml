@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-browser-mcp"
-version = "0.15.0"
+version = "0.15.1"
 description = "Local MCP server for reading and interacting with web pages through real Chrome."
 readme = "README.en.md"
 requires-python = ">=3.12"
@@ -45,6 +45,7 @@ packages = ["src/browser_mcp"]
 "extension/manifest.json" = "browser_mcp/extension/manifest.json"
 "extension/options.html" = "browser_mcp/extension/options.html"
 "extension/options.js" = "browser_mcp/extension/options.js"
+"extension/zhihu_api.js" = "browser_mcp/extension/zhihu_api.js"
 
 [tool.pytest.ini_options]
 addopts = "-ra"
