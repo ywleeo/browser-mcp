@@ -373,6 +373,34 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 | `sogou_search` | 搜狗 | 使用搜狗搜索网页，返回原始网站链接、标题、站点和摘要；排除搜狗站内导航及带有明确广告标识的结果。 |
 | `site_read_page` | 知乎等平台 | 当平台内容较长时继续读取后续内容，不重新访问目标页面，适合完整获取长回答或长文章。 |
 
+### 工具分组（按需暴露）
+
+41 个工具全塞给客户端，每次请求都要重发全部 schema，小任务也要在几十个工具里挑。用
+`BROWSER_MCP_TOOLSETS` 只暴露当前场景需要的那组：
+
+```bash
+BROWSER_MCP_TOOLSETS=core,search browser-mcp serve
+# 或者
+browser-mcp serve --toolsets core,search
+```
+
+| 分组 | 包含的工具 |
+| --- | --- |
+| `core` | `browser_*` 共 12 个通用浏览与操作工具 |
+| `search` | `google_search`、`bing_search`、`sogou_search` |
+| `site` | `site_login_status`、`site_read_page` |
+| `zhihu` | `zhihu_search`、`zhihu_content`、`zhihu_invitations` |
+| `xhs` | 小红书 8 个工具 |
+| `douyin` | 抖音 6 个工具 |
+| `bilibili` | B 站 4 个工具 |
+| `reddit` | `reddit_search`、`reddit_post` |
+| `x` | `x_search`、`x_post` |
+
+不设置时保持原样，注册全部 41 个工具。写错分组名会在启动时报错并列出可用分组。
+
+按连接生效：每个客户端拉起自己的 server，各选各的组合。想留全部工具但按需加载，选
+`all`（即不设置），让客户端自己控制加载。
+
 ### 使用示例
 
 可以直接向支持 MCP 的客户端提出自然语言请求，例如：

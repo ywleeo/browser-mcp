@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from dataclasses import replace
 
-from browser_mcp.config import AppSettings
+from browser_mcp.config import AppSettings, parse_toolsets
 from browser_mcp.logging_config import configure_logging
 from browser_mcp.mcp.server import create_server
 from browser_mcp.process_lifecycle import start_owner_watchdog
@@ -22,7 +23,15 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the stable CLI shared by humans and upgrade-capable Agents."""
     parser = argparse.ArgumentParser(prog="browser-mcp")
     subcommands = parser.add_subparsers(dest="command")
-    subcommands.add_parser("serve", help="run the MCP server over stdio")
+    serve = subcommands.add_parser("serve", help="run the MCP server over stdio")
+    serve.add_argument(
+        "--toolsets",
+        metavar="GROUPS",
+        help=(
+            "comma-separated tool groups to expose (core, search, site, zhihu, xhs, "
+            "douyin, bilibili, reddit, x); default: every group"
+        ),
+    )
     upgrade = subcommands.add_parser("upgrade", help="check or apply a safe source update")
     mode = upgrade.add_mutually_exclusive_group()
     mode.add_argument(
@@ -59,6 +68,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     settings = AppSettings.from_env()
+    toolsets = parse_toolsets(getattr(args, "toolsets", None))
+    if toolsets is not None:
+        settings = replace(settings, toolsets=toolsets)
     configure_logging(settings.log_level)
     start_owner_watchdog()
     create_server(settings).run(transport="stdio")

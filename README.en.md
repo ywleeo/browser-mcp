@@ -406,6 +406,35 @@ you don't need to fill in parameters by hand.
 | `sogou_search` | Sogou | Searches the web with Sogou; returns original site links, titles, sites, and snippets; excludes Sogou's own site nav and clearly-advertised results. |
 | `site_read_page` | Zhihu etc. | Continues reading paginated content for long answers/articles without revisiting the page. |
 
+### Tool groups (expose on demand)
+
+All 41 tools in every request means every schema is re-sent each turn, and a one-line task
+still has to choose among dozens of tools. `BROWSER_MCP_TOOLSETS` exposes only the groups the
+current job needs:
+
+```bash
+BROWSER_MCP_TOOLSETS=core,search browser-mcp serve
+# or
+browser-mcp serve --toolsets core,search
+```
+
+| Group | Tools |
+| --- | --- |
+| `core` | the 12 general `browser_*` tools |
+| `search` | `google_search`, `bing_search`, `sogou_search` |
+| `site` | `site_login_status`, `site_read_page` |
+| `zhihu` | `zhihu_search`, `zhihu_content`, `zhihu_invitations` |
+| `xhs` | the 8 Xiaohongshu tools |
+| `douyin` | the 6 Douyin tools |
+| `bilibili` | the 4 Bilibili tools |
+| `reddit` | `reddit_search`, `reddit_post` |
+| `x` | `x_search`, `x_post` |
+
+Unset keeps the previous behavior and registers all 41 tools. An unknown group fails at startup
+and lists the valid names.
+
+Selection is per connection: each client launches its own server and picks its own set.
+
 ### Examples
 
 Just ask an MCP-capable client in plain language:

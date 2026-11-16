@@ -14,6 +14,17 @@ DEFAULT_BRIDGE_PORT_POOL_SIZE = 10
 DEFAULT_IDLE_TIMEOUT_SECONDS = 3_600.0
 DEFAULT_RECLAIM_IDLE_SECONDS = 300.0
 DEFAULT_DATA_DIR = user_data_path("browser-mcp", appauthor=False)
+TOOL_GROUP_NAMES = (
+    "core",
+    "search",
+    "site",
+    "zhihu",
+    "xhs",
+    "douyin",
+    "bilibili",
+    "reddit",
+    "x",
+)
 LOG_LEVELS = {
     "CRITICAL": logging.CRITICAL,
     "ERROR": logging.ERROR,
@@ -34,6 +45,8 @@ class AppSettings:
     data_dir: Path = DEFAULT_DATA_DIR
     extension_dir: Path = Path()
     log_level: int = logging.INFO
+    #: Tool groups this process exposes; ``None`` keeps every tool registered.
+    toolsets: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid direct construction as strictly as environment parsing."""
@@ -84,6 +97,7 @@ class AppSettings:
             "BROWSER_MCP_RECLAIM_IDLE_SECONDS",
             DEFAULT_RECLAIM_IDLE_SECONDS,
         )
+        toolsets = parse_toolsets(os.getenv("BROWSER_MCP_TOOLSETS"))
         data_dir = _parse_data_dir(os.getenv("BROWSER_MCP_DATA_DIR"))
         extension_dir = _parse_extension_dir(os.getenv("BROWSER_MCP_EXTENSION_DIR"))
         log_level = _parse_log_level(os.getenv("BROWSER_MCP_LOG_LEVEL"))
@@ -94,6 +108,7 @@ class AppSettings:
             data_dir=data_dir,
             extension_dir=extension_dir,
             log_level=log_level,
+            toolsets=toolsets,
         )
 
 
@@ -113,6 +128,24 @@ def _default_extension_dir() -> Path:
     if project_root is not None:
         return project_root / "extension"
     return DEFAULT_DATA_DIR / "extension"
+
+
+def parse_toolsets(raw: str | None) -> frozenset[str] | None:
+    """Parse the optional comma-separated tool groups, rejecting unknown names."""
+    if raw is None or raw.strip() == "":
+        return None
+    names = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not names:
+        return None
+    unknown = sorted(set(names) - set(TOOL_GROUP_NAMES))
+    if unknown:
+        known = ", ".join(TOOL_GROUP_NAMES)
+        raise ValueError(
+            "BROWSER_MCP_TOOLSETS contains unknown group(s): "
+            + ", ".join(unknown)
+            + f"; known groups: {known}"
+        )
+    return frozenset(names)
 
 
 def _parse_port(raw: str | None) -> int:

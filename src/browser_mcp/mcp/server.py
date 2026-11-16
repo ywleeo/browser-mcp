@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from mcp.server.mcpserver import MCPServer
@@ -104,6 +105,58 @@ def _visual_tool_result(result: BrowserVisualResult) -> CallToolResult:
     )
 
 
+TOOL_GROUP_BY_NAME: dict[str, str] = {
+    "browser_click": "core",
+    "browser_dialog": "core",
+    "browser_press": "core",
+    "browser_read": "core",
+    "browser_read_page": "core",
+    "browser_scroll": "core",
+    "browser_select": "core",
+    "browser_snapshot": "core",
+    "browser_status": "core",
+    "browser_tabs": "core",
+    "browser_type": "core",
+    "browser_upload": "core",
+    "site_login_status": "site",
+    "site_read_page": "site",
+    "google_search": "search",
+    "bing_search": "search",
+    "sogou_search": "search",
+    "zhihu_search": "zhihu",
+    "zhihu_content": "zhihu",
+    "zhihu_invitations": "zhihu",
+    "xhs_search": "xhs",
+    "xhs_note": "xhs",
+    "xhs_comments": "xhs",
+    "xhs_download": "xhs",
+    "xhs_like": "xhs",
+    "xhs_collect": "xhs",
+    "xhs_user_notes": "xhs",
+    "douyin_search": "douyin",
+    "douyin_video": "douyin",
+    "douyin_comments": "douyin",
+    "douyin_download": "douyin",
+    "douyin_like": "douyin",
+    "douyin_collect": "douyin",
+    "bilibili_search": "bilibili",
+    "bilibili_video": "bilibili",
+    "bilibili_download_audio": "bilibili",
+    "bilibili_download_video": "bilibili",
+    "reddit_search": "reddit",
+    "reddit_post": "reddit",
+    "x_search": "x",
+    "x_post": "x",
+}
+
+
+def exposed_tool_names(toolsets: frozenset[str] | None) -> frozenset[str] | None:
+    """Return the tool names the selected groups expose, or None for every tool."""
+    if toolsets is None:
+        return None
+    return frozenset(name for name, group in TOOL_GROUP_BY_NAME.items() if group in toolsets)
+
+
 def create_server(
     settings: AppSettings | None = None,
     service: BrowserService | None = None,
@@ -174,11 +227,26 @@ def create_server(
             "when the user chooses a web search engine. Authenticated platform tools "
             "check login before every task. If a tool reports that login is required, tell the "
             "user to log in with the provided URL and do not retry until they confirm."
+            + (
+                ""
+                if resolved_settings.toolsets is None
+                else " This connection exposes only these tool groups: "
+                + ", ".join(sorted(resolved_settings.toolsets))
+                + "."
+            )
         ),
         version=__version__,
         log_level="WARNING",
         lifespan=lifespan,
     )
+
+    exposed = exposed_tool_names(resolved_settings.toolsets)
+
+    def add(tool: Callable[..., Any], *, name: str, **kwargs: Any) -> None:
+        """Register one tool only when the selected groups expose it."""
+        if exposed is not None and name not in exposed:
+            return
+        server.add_tool(tool, name=name, **kwargs)
 
     async def _browser_status() -> BrowserStatus:
         """Return bridge diagnostics without claiming unavailable capabilities."""
@@ -579,7 +647,7 @@ def create_server(
         )
         return await websites.read_page(request)
 
-    server.add_tool(
+    add(
         _browser_status,
         name="browser_status",
         description="Return the local Chrome extension bridge installation and connection status.",
@@ -591,7 +659,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _browser_read,
         name="browser_read",
         description=(
@@ -606,7 +674,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _browser_read_page,
         name="browser_read_page",
         description="Read the next Unicode-safe page from an existing immutable browser snapshot.",
@@ -618,7 +686,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _browser_snapshot,
         name="browser_snapshot",
         description=(
@@ -632,7 +700,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_click,
         name="browser_click",
         description=(
@@ -649,7 +717,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_dialog,
         name="browser_dialog",
         description=(
@@ -666,7 +734,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_tabs,
         name="browser_tabs",
         description=(
@@ -682,7 +750,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_scroll,
         name="browser_scroll",
         description=(
@@ -699,7 +767,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_type,
         name="browser_type",
         description=(
@@ -713,7 +781,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_press,
         name="browser_press",
         description=(
@@ -727,7 +795,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_select,
         name="browser_select",
         description=(
@@ -741,7 +809,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _browser_upload,
         name="browser_upload",
         description=(
@@ -766,7 +834,7 @@ def create_server(
             open_world_hint=True,
         ),
     )
-    server.add_tool(
+    add(
         _site_login_status,
         name="site_login_status",
         description=(
@@ -781,7 +849,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _zhihu_search,
         name="zhihu_search",
         description="Search Zhihu using the current Chrome session and return normalized results.",
@@ -793,7 +861,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _zhihu_content,
         name="zhihu_content",
         description="Read a Zhihu question, answer, or article as a pageable normalized document.",
@@ -805,7 +873,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _zhihu_invitations,
         name="zhihu_invitations",
         description=(
@@ -819,7 +887,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _bilibili_search,
         name="bilibili_search",
         description=(
@@ -834,7 +902,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _bilibili_video,
         name="bilibili_video",
         description=(
@@ -849,7 +917,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _bilibili_download_video,
         name="bilibili_download_video",
         description=(
@@ -865,7 +933,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _bilibili_download_audio,
         name="bilibili_download_audio",
         description=(
@@ -880,7 +948,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_search,
         name="xhs_search",
         description=(
@@ -894,7 +962,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_note,
         name="xhs_note",
         description="Read one Xiaohongshu explore-note URL with its xsec access parameters.",
@@ -906,7 +974,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_like,
         name="xhs_like",
         description=(
@@ -922,7 +990,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_collect,
         name="xhs_collect",
         description=(
@@ -938,7 +1006,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_download,
         name="xhs_download",
         description=(
@@ -953,7 +1021,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_comments,
         name="xhs_comments",
         description=(
@@ -972,7 +1040,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _xhs_user_notes,
         name="xhs_user_notes",
         description=(
@@ -987,7 +1055,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_search,
         name="douyin_search",
         description=(
@@ -1002,7 +1070,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_video,
         name="douyin_video",
         description=(
@@ -1016,7 +1084,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_like,
         name="douyin_like",
         description=(
@@ -1032,7 +1100,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_collect,
         name="douyin_collect",
         description=(
@@ -1048,7 +1116,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_download,
         name="douyin_download",
         description=(
@@ -1063,7 +1131,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _douyin_comments,
         name="douyin_comments",
         description=(
@@ -1082,7 +1150,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _x_search,
         name="x_search",
         description=(
@@ -1096,7 +1164,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _x_post,
         name="x_post",
         description="Read one X post with author, text, metrics, links, and media URLs.",
@@ -1108,7 +1176,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _reddit_search,
         name="reddit_search",
         description="Search Reddit posts and return normalized post metadata and links.",
@@ -1120,7 +1188,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _reddit_post,
         name="reddit_post",
         description="Read one Reddit post and a bounded set of comments rendered on its page.",
@@ -1132,7 +1200,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _google_search,
         name="google_search",
         description="Search the public web with Google through the user's real Chrome session.",
@@ -1144,7 +1212,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _bing_search,
         name="bing_search",
         description="Search the public web with Bing through the user's real Chrome session.",
@@ -1156,7 +1224,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _sogou_search,
         name="sogou_search",
         description="Search the public web with Sogou through the user's real Chrome session.",
@@ -1168,7 +1236,7 @@ def create_server(
         ),
         structured_output=True,
     )
-    server.add_tool(
+    add(
         _site_read_page,
         name="site_read_page",
         description="Read the next page of an existing immutable site-specific document snapshot.",
