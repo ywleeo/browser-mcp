@@ -40,7 +40,12 @@ const ORPHAN_ALARM_PREFIX = "browser-mcp-orphan-";
 const ORPHAN_GRACE_MINUTES = 5;
 // Public-DNS verification can use two proxy-safe DoH fallbacks before approval.
 const URL_CHECK_TIMEOUT_MS = 20000;
-const PAGE_LOAD_TIMEOUT_MS = 30000;
+// MCP clients commonly cut a call off around 25-30s, while the server itself waits
+// up to FETCH_TIMEOUT_SECONDS (65s). A 30s page-load bound therefore outlives the
+// caller: the tools time out client-side while the extension is still waiting.
+// 14s keeps slow pages (Bilibili search, comment streams) working and leaves room
+// inside the caller's budget.
+const PAGE_LOAD_TIMEOUT_MS = 14000;
 const HTML_LARGE_LIMIT = 4_000_000;
 const HTML_SMALL_LIMIT = 256_000;
 const TEXT_LIMIT = 4_000_000;
@@ -1269,6 +1274,7 @@ async function interactionDebuggerSession(state, session, tabId) {
     void task.finally(() => debuggerSession.guardTasks.delete(task));
   };
   chrome.debugger.onEvent.addListener(debuggerSession.listener);
+  debuggerSession.touchedAt = Date.now();
   interactionDebuggers.set(session, debuggerSession);
   return debuggerSession;
 }
@@ -1322,6 +1328,32 @@ function interactionDialogVisualState(tab, screenshotState, dialog) {
   return { state, screenshot_data: screenshotState.screenshotData };
 }
 
+/**
+ * Release interactive debugger sessions that have gone quiet.
+ *
+ * interactionDebuggers was only released when the socket dropped or the tab closed. A
+ * visual tool that stalls (a screenshot on an occluded window, an aborted action) left
+ * the attachment in place, and because every later browser_snapshot / scroll / click
+ * needs that same attachment point, those calls then failed too — until the browser was
+ * restarted. commentSessions already had a TTL sweep; this brings the interactive side
+ * in line.
+ *
+ * The threshold is deliberately generous: it must not cut short a slow but healthy
+ * capture, while still clearing a stuck one within a single stuck session.
+ */
+const INTERACTION_DEBUGGER_IDLE_MS = 3 * 60 * 1000;
+
+async function sweepStaleInteractionDebuggers() {
+  const now = Date.now();
+  for (const [session, debuggerSession] of [...interactionDebuggers.entries()]) {
+    const touched = Number(debuggerSession?.touchedAt) || 0;
+    if (touched && now - touched < INTERACTION_DEBUGGER_IDLE_MS) continue;
+    // Detaching while a native dialog is open would dismiss the user's prompt.
+    if (debuggerSession?.dialog) continue;
+    await closeInteractionDebugger(session).catch(() => {});
+  }
+}
+
 /** Release one persistent interaction debugger and its navigation listener. */
 async function closeInteractionDebugger(session) {
   const debuggerSession = interactionDebuggers.get(session);
@@ -1360,6 +1392,45 @@ async function attachInteractionDebugger(tabId) {
 }
 
 /** Resolve or create the one managed interaction tab for a bridge session. */
+/**
+ * Close comment windows this worker previously opened and no longer owns.
+ *
+ * A comment collection creates an isolated window. If the call is abandoned (the MCP
+ * client times out, the socket drops mid-collection) the window stays behind, and every
+ * such leftover tab keeps holding a chrome.debugger attachment point. Later collections
+ * then fail to attach and time out too, so the residue compounds until the tools stop
+ * working until the browser is restarted.
+ *
+ * Only windows that are single-tab, on the given host, and not owned by a live session
+ * qualify, so a tab the user opened themselves is never touched.
+ */
+async function reclaimStaleCommentWindows(hostSuffix) {
+  await commentSessionHydration;
+  const liveTabs = new Set();
+  const liveWindows = new Set();
+  for (const session of commentSessions.values()) {
+    if (session.tabId != null) liveTabs.add(session.tabId);
+    if (session.windowId != null) liveWindows.add(session.windowId);
+  }
+  let windows;
+  try {
+    windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
+  } catch {
+    return;
+  }
+  const escapedHost = String(hostSuffix).replace(/\./g, "\\.");
+  const hostPattern = new RegExp(`^https?://([a-z0-9-]+\.)*${escapedHost}/`, "i");
+  for (const win of windows || []) {
+    if (liveWindows.has(win.id)) continue;
+    const tabs = win.tabs || [];
+    if (tabs.length !== 1) continue;
+    const only = tabs[0];
+    if (only?.id == null || liveTabs.has(only.id)) continue;
+    if (!hostPattern.test(String(only.url || ""))) continue;
+    await chrome.windows.remove(win.id).catch(() => {});
+  }
+}
+
 async function interactionTab(state, requestedSession, action, requestedUrl) {
   await interactionHydration;
   const session = `${state.port}:${String(requestedSession || "default")}`;
@@ -1914,9 +1985,15 @@ async function executeSelect(tabId, elementId, requestedValue) {
 }
 
 /** Wait for top-level navigation when present, then allow bounded SPA rendering time. */
+// Settling after an action is "give the page a moment", not "wait for the document".
+// Reusing PAGE_LOAD_TIMEOUT_MS made every scroll/click sit out the full page-load
+// bound on SPA pages that never reach status === "complete", which alone exceeded
+// the caller's budget. 4s covers rendering and transitions.
+const INTERACTION_SETTLE_TIMEOUT_MS = 4000;
+
 async function settleInteractionTab(tabId, waitMs, signal = null) {
   try {
-    await waitForTabComplete(tabId, PAGE_LOAD_TIMEOUT_MS, signal);
+    await waitForTabComplete(tabId, INTERACTION_SETTLE_TIMEOUT_MS, signal);
   } catch (error) {
     if (!String(error?.message || error).includes("tab load timeout")) throw error;
   }
@@ -2827,6 +2904,7 @@ async function runXhsComments(state, args, reply) {
         reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
         return;
       }
+      await reclaimStaleCommentWindows("xiaohongshu.com");
       const createdWindow = await chrome.windows.create({
         url: "https://www.xiaohongshu.com/explore",
         focused: false,
@@ -2972,7 +3050,9 @@ async function runXhsComments(state, args, reply) {
       complete = true;
     }
     // Only a budget stop is resumable: every other exit means this note has nothing left to give.
-    const suspended = budgetExhausted && !complete && !limitReached;
+    // A session with nothing collected has nothing to resume, and holding it open
+    // keeps a window and a debugger attached for no benefit.
+    const suspended = budgetExhausted && !complete && !limitReached && seenIds.size > 0;
     if (suspended) await suspendCommentSession(session);
     else await closeCommentSession(session);
     reply({
@@ -3760,7 +3840,7 @@ async function clickDouyinReplyExpander(debugTarget, point) {
   try {
     await dispatchTrustedPointClick(debugTarget, point);
   } catch (firstError) {
-    if (!/not attached/i.test(String(firstError?.message || firstError))) throw firstError;
+    if (!/not attached|detached while handling/i.test(String(firstError?.message || firstError))) throw firstError;
     await chrome.debugger.attach(debugTarget, "1.3");
     await dispatchTrustedPointClick(debugTarget, point);
   }
@@ -3779,7 +3859,7 @@ async function scrollDouyinCommentStream(tabId, debugTarget, ui, deltaY) {
     await chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", command);
     return;
   } catch (firstError) {
-    if (!/not attached/i.test(String(firstError?.message || firstError))) throw firstError;
+    if (!/not attached|detached while handling/i.test(String(firstError?.message || firstError))) throw firstError;
   }
   try {
     await chrome.debugger.attach(debugTarget, "1.3");
@@ -3881,6 +3961,7 @@ async function runDouyinComments(state, args, reply) {
         reply({ ok: false, error: `navigation blocked: ${approval.error || "URL policy"}` });
         return;
       }
+      await reclaimStaleCommentWindows("douyin.com");
       const createdWindow = await chrome.windows.create({
         url: "https://www.douyin.com/",
         focused: false,
@@ -3904,11 +3985,24 @@ async function runDouyinComments(state, args, reply) {
         loop,
         release: (closed) => pendingDouyinComments.delete(closed.tabId),
       });
-      await waitForTabComplete(tabId);
+      // Two unbounded page-load waits back to back can each consume the whole
+      // PAGE_LOAD_TIMEOUT_MS, which overruns the caller's budget before the first
+      // comment is even requested. Bound each wait by what is left of the budget,
+      // and treat a slow load as non-fatal: the page is usually already rendering.
+      const remainingMs = () => Math.max(4000, deadline - Date.now());
+      try {
+        await waitForTabComplete(tabId, Math.min(15000, remainingMs()));
+      } catch (error) {
+        if (!/tab load timeout/i.test(String(error?.message || error))) throw error;
+      }
       pending = { responses: [], errors: [] };
       pendingDouyinComments.set(tabId, pending);
       await chrome.tabs.update(tabId, { url: target.toString() });
-      await waitForTabComplete(tabId);
+      try {
+        await waitForTabComplete(tabId, Math.min(15000, remainingMs()));
+      } catch (error) {
+        if (!/tab load timeout/i.test(String(error?.message || error))) throw error;
+      }
       await new Promise((resolve) => setTimeout(resolve, 1200));
       debugTarget = { tabId };
       await ensureDebuggerAttached(debugTarget);
@@ -4068,7 +4162,9 @@ async function runDouyinComments(state, args, reply) {
       && !limitReached
     ) complete = true;
     // Only a budget stop is resumable: every other exit means this post has nothing left to give.
-    const suspended = budgetExhausted && !complete && !limitReached;
+    // A session with nothing collected has nothing to resume, and holding it open
+    // keeps a window and a debugger attached for no benefit.
+    const suspended = budgetExhausted && !complete && !limitReached && seenIds.size > 0;
     if (suspended) await suspendCommentSession(session);
     else await closeCommentSession(session);
     reply({
@@ -4110,7 +4206,10 @@ chrome.alarms.create("browser-mcp-keepalive", { periodInMinutes: 1 });
 chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "browser-mcp-keepalive") connectAll();
-  else if (alarm.name === SWEEP_ALARM_NAME) void sweepCommentSessions();
+  else if (alarm.name === SWEEP_ALARM_NAME) {
+    void sweepCommentSessions();
+    void sweepStaleInteractionDebuggers();
+  }
   else if (alarm.name.startsWith(ORPHAN_ALARM_PREFIX)) {
     const port = Number(alarm.name.slice(ORPHAN_ALARM_PREFIX.length));
     if (Number.isInteger(port)) void reclaimOrphanedPort(port);
