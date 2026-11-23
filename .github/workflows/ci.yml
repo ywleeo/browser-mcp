@@ -28,7 +28,6 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: '3.13'
-        with:
           enable-cache: true
 
       - name: Sync dependencies
