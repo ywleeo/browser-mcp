@@ -16,6 +16,7 @@ dependencies = [
   "platformdirs>=4.4,<5",
   "pydantic>=2.12,<3",
   "readability-lxml>=0.8.4.1,<0.9",
+  "tzdata>=2025.1; sys_platform == 'win32'",
   "websockets>=15,<16",
 ]
 

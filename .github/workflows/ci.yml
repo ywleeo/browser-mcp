@@ -43,12 +43,9 @@ jobs:
         if: runner.os != 'Windows'
         run: uv run pytest -q
 
-      # These suites exercise POSIX process probes and signals. Keep the Windows
-      # stdio smoke test independent of the POSIX owner watchdog as well.
+      # These suites exercise POSIX process probes and signals.
       - name: Test Windows-compatible Python paths
         if: runner.os == 'Windows'
-        env:
-          BROWSER_MCP_OWNER_PID: '0'
         run: uv run pytest -q --ignore=tests/test_bridge_registry.py --ignore=tests/test_process_lifecycle.py
 
       - name: Install Node.js

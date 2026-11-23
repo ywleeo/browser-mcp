@@ -16,6 +16,7 @@ def test_policy_resolves_relative_and_user_paths(
     picture = home / "poster.png"
     picture.write_bytes(b"png-bytes")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(home)
 
     policy = LocalFilePolicy()

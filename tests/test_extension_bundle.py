@@ -213,7 +213,7 @@ def test_extension_and_server_gate_the_same_interaction_actions() -> None:
 
     background = Path(__file__).resolve().parents[1] / "extension" / "background.js"
     declaration = re.search(
-        r"const INTERACTION_ACTIONS = \[(.*?)\];", background.read_text(), re.DOTALL
+        r"const INTERACTION_ACTIONS = \[(.*?)\];", background.read_text(encoding="utf-8"), re.DOTALL
     )
 
     assert declaration is not None, "extension must declare INTERACTION_ACTIONS"

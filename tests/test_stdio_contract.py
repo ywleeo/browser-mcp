@@ -27,6 +27,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
         env={
             "BROWSER_MCP_BRIDGE_PORT": str(bridge_port),
             "BROWSER_MCP_DATA_DIR": str(tmp_path),
+            "BROWSER_MCP_OWNER_PID": "0",
         },
     )
 
