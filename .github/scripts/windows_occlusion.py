@@ -26,9 +26,12 @@ PAGE = f"""
   button {{ position: fixed; inset: 40% 30%; }}
 </style>
 <button onclick="document.title = '{TITLE} clicked'; fetch('/click')">Record click</button>
-<script>addEventListener('scroll', () => fetch('/scroll'), {{once:true}})</script>
+<script>
+  addEventListener('scroll', () => fetch('/scroll'), {{once:true}})
+  addEventListener('visibilitychange', () => fetch('/' + document.visibilityState))
+</script>
 """.encode()
-EFFECTS = {"click": Event(), "scroll": Event()}
+EFFECTS = {name: Event() for name in ("click", "scroll", "hidden")}
 
 user32 = ctypes.windll.user32
 window_callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -37,6 +40,7 @@ user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
 user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
 user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, *([ctypes.c_int] * 4), wintypes.UINT)
 user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
 user32.GetAncestor.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = (wintypes.POINT,)
@@ -104,10 +108,6 @@ def chrome_window() -> tuple[int, wintypes.RECT]:
 async def cover_chrome(window: tkinter.Tk) -> None:
     """Place an opaque native window above Chrome and verify the exposed desktop points."""
     target, bounds = chrome_window()
-    window.geometry(
-        f"{bounds.right - bounds.left}x{bounds.bottom - bounds.top}"
-        f"{bounds.left:+}{bounds.top:+}"
-    )
     window.attributes("-topmost", True)
     window.deiconify()
     window.update()
@@ -118,14 +118,19 @@ async def cover_chrome(window: tkinter.Tk) -> None:
     await asyncio.sleep(0.2)
     if user32.GetForegroundWindow() != target:
         raise RuntimeError("could not focus the managed Chrome window on this desktop")
-    window.focus_force()
-    window.update()
     window.attributes("-topmost", False)
+    window.update()
+    handle = user32.GetAncestor(window.winfo_id(), 2)
+    if not user32.SetWindowPos(
+        handle, None, bounds.left - 20, bounds.top - 20,
+        bounds.right - bounds.left + 40, bounds.bottom - bounds.top + 40, 0,
+    ):
+        raise ctypes.WinError()
+    window.focus_force()
     window.update()
 
     # Leave Chrome enough time to calculate a stable occlusion state.
     await asyncio.sleep(2)
-    handle = user32.GetAncestor(window.winfo_id(), 2)
     points = [
         (bounds.left + 12, bounds.top + 12),
         (bounds.right - 12, bounds.top + 12),
@@ -138,7 +143,8 @@ async def cover_chrome(window: tkinter.Tk) -> None:
         if user32.GetAncestor(hit, 2) != handle:
             window.withdraw()
             raise RuntimeError(f"native cover did not hide Chrome at desktop point {point}")
-    print(f"Verified native cover at {len(points)} points around the Chrome window")
+    print(f"Verified native cover at {len(points)} points, "
+          f"page reported hidden={EFFECTS['hidden'].is_set()}")
 
 
 async def trial(url: str, window: tkinter.Tk, action: str, *, focus: bool) -> str:
@@ -181,6 +187,7 @@ async def trial(url: str, window: tkinter.Tk, action: str, *, focus: bool) -> st
                 snapshot = await asyncio.wait_for(manager.interact("snapshot", {"url": url}), 20)
                 assert snapshot.state.title == TITLE, snapshot.state.title
                 print(f"Opened fixture for {action}, focus_before_input={focus}")
+                EFFECTS["hidden"].clear()
                 await cover_chrome(window)
                 EFFECTS[action].clear()
                 args = (
@@ -220,7 +227,6 @@ async def main() -> None:
     user32.SetProcessDPIAware()
     window = tkinter.Tk()
     window.title("Browser MCP opaque native cover")
-    window.overrideredirect(True)
     window.configure(background="#304355")
     window.withdraw()
     with ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as fixture:

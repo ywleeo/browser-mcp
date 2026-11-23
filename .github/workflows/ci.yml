@@ -36,10 +36,20 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check
+        if: runner.os == 'Linux'
         run: uv run pyright
 
       - name: Test
+        if: runner.os != 'Windows'
         run: uv run pytest -q
+
+      # These suites exercise POSIX process probes and signals. Keep the Windows
+      # stdio smoke test independent of the POSIX owner watchdog as well.
+      - name: Test Windows-compatible Python paths
+        if: runner.os == 'Windows'
+        env:
+          BROWSER_MCP_OWNER_PID: '0'
+        run: uv run pytest -q --ignore=tests/test_bridge_registry.py --ignore=tests/test_process_lifecycle.py
 
       - name: Install Node.js
         uses: actions/setup-node@v6
