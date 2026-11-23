@@ -27,6 +27,7 @@ def test_settings_accept_valid_environment(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setenv("BROWSER_MCP_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BROWSER_MCP_EXTENSION_DIR", str(tmp_path / "browser-extension"))
     monkeypatch.setenv("BROWSER_MCP_LOG_LEVEL", "debug")
+    monkeypatch.setenv("BROWSER_MCP_FOCUS_BEFORE_INPUT", "1")
 
     settings = AppSettings.from_env()
 
@@ -34,6 +35,7 @@ def test_settings_accept_valid_environment(monkeypatch: pytest.MonkeyPatch, tmp_
     assert settings.data_dir == tmp_path
     assert settings.extension_dir == tmp_path / "browser-extension"
     assert settings.log_level == logging.DEBUG
+    assert settings.focus_before_input is True
 
 
 def test_settings_reject_relative_data_directory(monkeypatch: pytest.MonkeyPatch) -> None:

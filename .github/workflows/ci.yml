@@ -15,7 +15,11 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -36,3 +40,40 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Test Chrome extension
+        run: npm test
+
+  windows-occlusion:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - uses: astral-sh/setup-uv@v10.1.0
+
+      - name: Download Chrome for Testing
+        shell: pwsh
+        run: |
+          $manifest = Invoke-RestMethod https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json
+          $release = $manifest.channels.Stable
+          $download = $release.downloads.chrome | Where-Object platform -eq win64
+          Write-Host "Chrome for Testing $($release.version)"
+          $archive = Join-Path $env:RUNNER_TEMP 'chrome.zip'
+          curl.exe --fail --silent --show-error --retry 3 --output $archive $download.url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          "BROWSER_MCP_TEST_CHROME=$env:RUNNER_TEMP\chrome-win64\chrome.exe" >> $env:GITHUB_ENV
+
+      - name: Compare actual Chrome input behind a native window
+        run: uv run --locked python -u .github/scripts/windows_occlusion.py

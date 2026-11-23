@@ -939,9 +939,12 @@ async function dispatchBrowserInteraction(state, message) {
     debuggerSession = await interactionDebuggerSession(state, session, tabId);
     debuggerSession.policyFailure = null;
 
-    if (action === "click" || action === "dialog") {
+    const trustedMouseInput = (action === "click" && !refreshReason)
+      || (action === "scroll" && !args.element_id);
+    const forceFocus = message.focus_before_input === true && trustedMouseInput;
+    if (forceFocus || action === "click" || action === "dialog") {
       stage = "focus managed interaction window";
-      restoreFocusedWindowId = await focusManagedInteractionWindow(session, tab);
+      restoreFocusedWindowId = await focusManagedInteractionWindow(session, tab, forceFocus);
     }
 
     if (action === "dialog") {
@@ -1073,20 +1076,21 @@ async function dispatchBrowserInteraction(state, message) {
 }
 
 /** Focus only an extension-owned interaction window and remember the user's prior window. */
-async function focusManagedInteractionWindow(session, tab) {
+async function focusManagedInteractionWindow(session, tab, force = false) {
   const managedWindowId = interactionWindows.get(session);
   if (managedWindowId == null || managedWindowId !== tab.windowId) return null;
   const previous = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
-  if (previous?.id === managedWindowId) return null;
+  // Chrome can report this window as last focused while another application covers it.
+  if (!force && previous?.id === managedWindowId) return null;
+  if (force && tab.active === false) await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(managedWindowId, { focused: true });
   // Let Chrome finish activating the page surface before trusted input is dispatched.
-  // The screenshot itself is captured through CDP, so this focus transition cannot
-  // introduce browser-window chrome into the visual coordinate system.
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  await new Promise((resolve) => setTimeout(resolve, force ? 150 : 80));
+  if (force && (previous?.id === managedWindowId || previous?.focused !== true)) return null;
   return previous?.id ?? null;
 }
 
-/** Restore the browser window that was focused before one trusted managed click. */
+/** Restore the Chrome window that was focused before the managed interaction. */
 async function restoreInteractionWindowFocus(windowId) {
   if (windowId == null) return;
   await chrome.windows.update(windowId, { focused: true }).catch(() => {});

@@ -47,6 +47,8 @@ class AppSettings:
     log_level: int = logging.INFO
     #: Tool groups this process exposes; ``None`` keeps every tool registered.
     toolsets: frozenset[str] | None = None
+    #: Bring a managed Chrome window to the foreground before trusted mouse input.
+    focus_before_input: bool = False
 
     def __post_init__(self) -> None:
         """Reject invalid direct construction as strictly as environment parsing."""
@@ -109,6 +111,7 @@ class AppSettings:
             extension_dir=extension_dir,
             log_level=log_level,
             toolsets=toolsets,
+            focus_before_input=os.getenv("BROWSER_MCP_FOCUS_BEFORE_INPUT") == "1",
         )
 
 

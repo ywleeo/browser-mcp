@@ -378,7 +378,7 @@ class BridgeManager:
         request_id = uuid4().hex
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
-        payload = {
+        payload: dict[str, object] = {
             "type": message_type,
             "id": request_id,
             "tab_id": "default",
@@ -386,6 +386,13 @@ class BridgeManager:
         }
         if action is not None:
             payload["action"] = action
+        # Keep this opt-in scoped to one bridge process and its trusted mouse actions.
+        if (
+            message_type == "browser.interact"
+            and action in {"click", "scroll"}
+            and self._settings.focus_before_input
+        ):
+            payload["focus_before_input"] = True
         try:
             async with self._send_lock:
                 await connection.send(json.dumps(payload))

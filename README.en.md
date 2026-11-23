@@ -357,6 +357,12 @@ server may sit unused before retiring (`0` disables self-retirement), and
 may reclaim its port. Reclamation only targets a process whose PID *and* start time still match the
 recorded lease; a PID the kernel has reused loses the stale record and is never signalled.
 
+On Windows, if `browser_click` or wheel-based `browser_scroll` times out while another app fully
+covers Chrome, set `BROWSER_MCP_FOCUS_BEFORE_INPUT=1` in the Browser MCP server environment.
+Restart the server and open a managed window with `browser_snapshot` and a URL. This opt-in brings
+the managed Chrome window to the foreground before clicks and wheel input, which can interrupt the
+app you are using. The extension can only restore focus to a previously focused Chrome window.
+
 ### MCP tools
 
 These tools are called automatically by any MCP-capable client. In daily use just describe your goal;

@@ -190,7 +190,12 @@ async def run_mock_site_extension(manager: BridgeManager, connected: asyncio.Eve
                 )
 
 
-async def run_mock_interaction_extension(manager: BridgeManager, connected: asyncio.Event) -> None:
+async def run_mock_interaction_extension(
+    manager: BridgeManager,
+    connected: asyncio.Event,
+    action: str,
+    expected_focus: bool,
+) -> None:
     """Emulate one screenshot-bearing visual interaction response."""
     installed = manager.installed
     if installed is None:
@@ -217,7 +222,11 @@ async def run_mock_interaction_extension(manager: BridgeManager, connected: asyn
             if message.get("type") == "ping":
                 await websocket.send(json.dumps({"type": "pong", "id": message.get("id")}))
             elif message.get("type") == "browser.interact":
-                assert message.get("action") == "snapshot"
+                assert message.get("action") == action
+                if expected_focus:
+                    assert message.get("focus_before_input") is True
+                else:
+                    assert "focus_before_input" not in message
                 await websocket.send(
                     json.dumps(
                         {
@@ -226,7 +235,7 @@ async def run_mock_interaction_extension(manager: BridgeManager, connected: asyn
                             "ok": True,
                             "data": {
                                 "state": {
-                                    "action": "snapshot",
+                                    "action": action,
                                     "url": "https://example.com/",
                                     "title": "Example",
                                     "screenshot_mime_type": "image/jpeg",
@@ -544,20 +553,34 @@ async def test_namespaced_site_action_round_trip(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_visual_interaction_round_trip_validates_image_and_page_state(tmp_path: Path) -> None:
-    """Interaction commands must retain action and validate the screenshot-bearing reply."""
+@pytest.mark.parametrize(
+    ("action", "focus_before_input", "expected_focus"),
+    [
+        ("snapshot", True, False),
+        ("click", False, False),
+        ("click", True, True),
+        ("scroll", True, True),
+    ],
+)
+async def test_visual_interaction_round_trip_validates_image_and_page_state(
+    tmp_path: Path, action: str, focus_before_input: bool, expected_focus: bool
+) -> None:
+    """Send the focus opt-in only with click and scroll, and validate their visual reply."""
     settings = AppSettings(
         bridge_port=reserve_free_port(),
         bridge_port_pool_size=1,
         data_dir=tmp_path,
+        focus_before_input=focus_before_input,
     )
     manager = BridgeManager(settings)
     await manager.start()
     connected = asyncio.Event()
-    extension_task = asyncio.create_task(run_mock_interaction_extension(manager, connected))
+    extension_task = asyncio.create_task(
+        run_mock_interaction_extension(manager, connected, action, expected_focus)
+    )
     try:
         await asyncio.wait_for(connected.wait(), 2)
-        result = await manager.interact("snapshot", {"url": "https://example.com/"})
+        result = await manager.interact(action, {})
 
         assert result.state.title == "Example"
         assert result.state.viewport.width == 1280

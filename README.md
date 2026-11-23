@@ -325,6 +325,11 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 新会话回收。回收只认「PID + 进程启动时间」完全匹配的目标，PID 被系统复用的进程只会被清掉过期
 记录，绝不会收到信号。
 
+在 Windows 上，如果其他应用完全盖住 Chrome 后 `browser_click` 或滚轮式 `browser_scroll`
+超时，可以在 MCP 客户端的 Browser MCP 服务配置中设置 `BROWSER_MCP_FOCUS_BEFORE_INPUT=1`，
+重启该服务后用带 URL 的 `browser_snapshot` 打开受管窗口。开启后，点击和滚轮输入前会把受管的
+Chrome 窗口切到前台，可能打断你正在使用的应用。扩展只能恢复先前获得焦点的 Chrome 窗口。
+
 ### MCP 能力
 
 这些工具由支持 MCP 的客户端自动调用。日常使用时直接描述目标即可，不需要手动填写接口参数。
