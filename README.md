@@ -313,7 +313,7 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
   MCP 调用。
 - 断连不会丢掉页面上的工作：MV3 service worker 休眠导致的短暂断开只释放 debugger 附着，
   标签页与窗口保留，重连后继续沿用；只有 MCP server 主动停止，或同一端口超过 5 分钟没能重连，
-  才会回收窗口。
+  才会回收该连接的受管标签页。
 - 扩展目录变化：以最新一次 `browser_status` 返回的 `extension_dir` 为准。
 - 不要分享 `pairing.json` 或 `pairing-token`，它们包含本地连接凭据。
 
@@ -330,6 +330,18 @@ Agent 不需要猜测项目路径。调用 `browser_status` 后，直接使用�
 重启该服务后用带 URL 的 `browser_snapshot` 打开受管窗口。开启后，点击和滚轮输入前会把受管的
 Chrome 窗口切到前台，可能打断你正在使用的应用。扩展只能恢复先前获得焦点的 Chrome 窗口。
 
+### 多页面会话
+
+用 `browser_snapshot(url="https://example.com", session="form", keep_open=true)` 打开一个
+需要保留的页面，再用另一个会话打开查询页面。后续点击、滚动等视觉工具传入各自的
+`session`，并使用对应页面的截图和元素引用。省略 `session` 时使用原有的 `default` 会话。
+
+同一 Chrome 配置中的 MCP 连接共用一个受管窗口，合计最多保留 5 个标签页。达到上限时，扩展会回收最久未使用、没有
+请求正在执行、也没有待处理对话框的临时会话。命名会话默认是临时的，`default` 默认保留。
+用 `browser_snapshot(session="form", keep_open=false)` 可将已经打开的会话设为临时，
+也可以调用 `browser_close_session(session="form")` 立即关闭受管标签页。会话关闭后，
+带上 URL 和原会话名重新打开，然后使用新截图。页面可以并行加载，需要焦点的输入会依次执行。
+
 ### MCP 能力
 
 这些工具由支持 MCP 的客户端自动调用。日常使用时直接描述目标即可，不需要手动填写接口参数。
@@ -340,6 +352,7 @@ Chrome 窗口切到前台，可能打断你正在使用的应用。扩展只能�
 | `browser_read` | 通用网页 | 使用真实 Chrome 打开网页，读取文章正文、页面可见文本、JavaScript 渲染内容及页面请求返回的数据；也能利用当前 Chrome 的网站登录状态。 |
 | `browser_read_page` | 通用网页 | 当网页内容较长时继续读取后续内容，并保持与首次读取相同的页面快照。 |
 | `browser_snapshot` | 网页操作 | 在共享当前登录态的后台 Chrome 窗口中打开网页，不切走用户当前页面；向 Agent 返回当前视口截图、可见文字以及带编号的按钮、链接、输入框等可操作元素。未提供网址时，可以观察当前页面。 |
+| `browser_close_session` | 网页操作 | 关闭指定会话的受管标签页，释放一个位置。 |
 | `browser_click` | 网页操作 | 直接按当前截图中的像素坐标移动可信鼠标并点击；点击链路不遍历 DOM 或 iframe，最多读取坐标下最上层的第一个 hover 节点。`element_id` 仅作为已保存截图中心点的简写。截图坐标会按实际位图尺寸映射到 CSS 视口，也可显式传入 `coordinate_space=viewport`。操作后只返回新截图；继续语义操作前重新调用 `browser_snapshot`。 |
 | `browser_dialog` | 网页操作 | 处理 Chrome 原生 `alert`、`confirm`、`prompt` 和离开页面确认框。`accept` 接受（离开页面），`dismiss` 取消（留在当前页面）；关闭后自动返回全新截图和元素引用。若用户已按 Esc 关闭，调用它会安全刷新页面状态。 |
 | `browser_scroll` | 网页操作 | 向上、向下、向左或向右滚动网页，也可以把指定元素滚动到视口中。滚轮落在截图坐标 `x`/`y` 上，传入面板、画布等可滚动区域内的一点即可滚动该区域而非整页；不传坐标则作用于视口中心。 |
@@ -380,7 +393,7 @@ Chrome 窗口切到前台，可能打断你正在使用的应用。扩展只能�
 
 ### 工具分组（按需暴露）
 
-41 个工具全塞给客户端，每次请求都要重发全部 schema，小任务也要在几十个工具里挑。用
+42 个工具全塞给客户端，每次请求都要重发全部 schema，小任务也要在几十个工具里挑。用
 `BROWSER_MCP_TOOLSETS` 只暴露当前场景需要的那组：
 
 ```bash
@@ -401,7 +414,7 @@ browser-mcp serve --toolsets core,search
 | `reddit` | `reddit_search`、`reddit_post` |
 | `x` | `x_search`、`x_post` |
 
-不设置时保持原样，注册全部 41 个工具。写错分组名会在启动时报错并列出可用分组。
+不设置时保持原样，注册全部 42 个工具。写错分组名会在启动时报错并列出可用分组。
 
 按连接生效：每个客户端拉起自己的 server，各选各的组合。想留全部工具但按需加载，选
 `all`（即不设置），让客户端自己控制加载。

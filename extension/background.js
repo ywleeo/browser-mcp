@@ -62,6 +62,12 @@ const pendingDouyinComments = new Map();
 const interactiveTabs = new Map();
 const interactionWindows = new Map();
 const interactionQueues = new Map();
+const interactionRegistryQueue = new Map();
+const interactionInputQueue = new Map();
+const interactionSessionUsage = new Map();
+const MAX_INTERACTION_TABS = 5;
+const INTERACTION_INPUT_TIMEOUT_MS = 20_000;
+let lastInteractionUse = 0;
 const interactionDebuggers = new Map();
 const lastInteractionScreenshots = new Map();
 
@@ -77,7 +83,11 @@ const INTERACTION_STATE_KEY = "browserMcpInteractionState";
 async function persistInteractionState() {
   const state = {};
   for (const [session, tabId] of interactiveTabs.entries()) {
-    state[session] = { tabId, windowId: interactionWindows.get(session) ?? null };
+    state[session] = {
+      tabId,
+      windowId: interactionWindows.get(session) ?? null,
+      ...interactionSessionUsage.get(session),
+    };
   }
   try {
     await chrome.storage.session.set({ [INTERACTION_STATE_KEY]: state });
@@ -87,10 +97,15 @@ async function persistInteractionState() {
 }
 
 /** Record one session's managed tab/window in memory and in session storage together. */
-async function setInteractionSession(session, tabId, windowId) {
+async function setInteractionSession(session, tabId, windowId, keepOpen) {
   interactiveTabs.set(session, tabId);
   if (windowId != null) interactionWindows.set(session, windowId);
   else interactionWindows.delete(session);
+  lastInteractionUse = Math.max(Date.now(), lastInteractionUse + 1);
+  interactionSessionUsage.set(session, {
+    lastUsed: lastInteractionUse,
+    keepOpen: keepOpen ?? interactionSessionUsage.get(session)?.keepOpen ?? session.endsWith(":default"),
+  });
   await persistInteractionState();
 }
 
@@ -99,6 +114,7 @@ async function deleteInteractionSession(session) {
   if (!interactiveTabs.has(session) && !interactionWindows.has(session)) return;
   interactiveTabs.delete(session);
   interactionWindows.delete(session);
+  interactionSessionUsage.delete(session);
   await persistInteractionState();
 }
 
@@ -107,17 +123,41 @@ async function hydrateInteractionState() {
   try {
     const stored = (await chrome.storage.session.get(INTERACTION_STATE_KEY))[INTERACTION_STATE_KEY];
     if (!stored) return;
+    let sharedWindowId = null;
+    let consolidated = false;
     for (const [session, entry] of Object.entries(stored)) {
       const tabId = entry?.tabId;
       if (tabId == null) continue;
       try {
-        await chrome.tabs.get(tabId);
+        const tab = await chrome.tabs.get(tabId);
         interactiveTabs.set(session, tabId);
-        if (entry.windowId != null) interactionWindows.set(session, entry.windowId);
+        if (entry.windowId === tab.windowId) {
+          sharedWindowId ??= tab.windowId;
+          let windowId = tab.windowId;
+          if (windowId !== sharedWindowId) {
+            // Older builds used a separate window for each bridge. Move only known owned tabs.
+            try {
+              const moved = await chrome.tabs.move(tabId, { windowId: sharedWindowId, index: -1 });
+              if (moved?.windowId === sharedWindowId) {
+                windowId = moved.windowId;
+                consolidated = true;
+              }
+            } catch (error) {
+              console.warn("[browser-mcp-extension] could not move managed tab", tabId, error);
+            }
+          }
+          interactionWindows.set(session, windowId);
+        }
+        lastInteractionUse = Math.max(lastInteractionUse, entry.lastUsed ?? 0);
+        interactionSessionUsage.set(session, {
+          lastUsed: entry.lastUsed ?? 0,
+          keepOpen: entry.keepOpen ?? session.endsWith(":default"),
+        });
       } catch {
         // The tab Chrome remembered is already gone; nothing to recover or close.
       }
     }
+    if (consolidated) await persistInteractionState();
   } catch (error) {
     console.warn("[browser-mcp-extension] interaction state hydration failed", error);
   }
@@ -220,24 +260,19 @@ function failUrlChecksForState(state) {
   }
 }
 
-/** Remove only isolated interaction resources owned by one disconnected bridge port. */
+/** Reclaim a stopped bridge's tabs without closing any other tabs in their window. */
 async function cleanupBridgeSessionsForPort(port) {
-  const prefix = `${port}:`;
-  const sessions = new Set([
-    ...[...interactiveTabs.keys()].filter((session) => session.startsWith(prefix)),
-    ...[...interactionWindows.keys()].filter((session) => session.startsWith(prefix)),
-    ...[...interactionDebuggers.keys()].filter((session) => session.startsWith(prefix)),
-    ...[...interactionQueues.keys()].filter((session) => session.startsWith(prefix)),
-    ...[...lastInteractionScreenshots.keys()].filter((session) => session.startsWith(prefix)),
-  ]);
-  for (const session of sessions) {
-    const windowId = interactionWindows.get(session);
-    await deleteInteractionSession(session);
-    interactionQueues.delete(session);
-    lastInteractionScreenshots.delete(session);
-    await closeInteractionDebugger(session);
-    if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
-  }
+  await runInteractionTask(interactionRegistryQueue, "registry", async () => {
+    await interactionHydration;
+    for (const session of interactiveTabs.keys()) {
+      if (!session.startsWith(`${port}:`)) continue;
+      try {
+        await closeManagedInteractionTab(session);
+      } catch (error) {
+        console.warn("[browser-mcp-extension] failed to reclaim session", session, error);
+      }
+    }
+  });
 }
 
 /** Release only what cannot outlive a dropped socket, keeping the agent's tab and window.
@@ -256,12 +291,11 @@ async function releaseBridgeDebuggersForPort(port) {
     ...[...interactionQueues.keys()].filter((session) => session.startsWith(prefix)),
   ]);
   for (const session of sessions) {
-    interactionQueues.delete(session);
     await closeInteractionDebugger(session);
   }
 }
 
-/** Give a dropped connection a grace period to come back before its window is reclaimed. */
+/** Give a dropped connection a grace period to come back before its tabs are reclaimed. */
 function scheduleOrphanCleanup(port) {
   chrome.alarms.create(`${ORPHAN_ALARM_PREFIX}${port}`, {
     delayInMinutes: ORPHAN_GRACE_MINUTES,
@@ -273,7 +307,7 @@ function cancelOrphanCleanup(port) {
   void chrome.alarms.clear(`${ORPHAN_ALARM_PREFIX}${port}`);
 }
 
-/** Reclaim the window of a port that never came back within its grace period. */
+/** Reclaim managed tabs of a port that never came back within its grace period. */
 async function reclaimOrphanedPort(port) {
   await cleanupBridgeSessionsForPort(port);
   await closeCommentSessionsForPort(port);
@@ -368,19 +402,25 @@ function connectPort(port, config) {
   socket.onerror = () => {};
 }
 
-/** Serialize actions per managed tab so concurrent agents cannot attach twice or reorder input. */
+/** Run work in order for a key and release the queue after success or failure. */
+async function runInteractionTask(queues, key, task) {
+  const previous = queues.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(task);
+  queues.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (queues.get(key) === current) queues.delete(key);
+  }
+}
+
+/** Keep same-session actions ordered so they cannot race over a tab or debugger. */
 function scheduleBrowserInteraction(state, message) {
   const session = `${state.port}:${String(message.tab_id || "default")}`;
-  const previous = interactionQueues.get(session) || Promise.resolve();
-  const current = previous
-    .catch(() => {})
-    .then(() => dispatchBrowserInteraction(state, message));
-  interactionQueues.set(session, current);
-  void current.finally(() => {
-    if (interactionQueues.get(session) === current) interactionQueues.delete(session);
-    if (state.socket?.readyState !== WebSocket.OPEN) {
-      void releaseBridgeDebuggersForPort(state.port);
-    }
+  const socket = state.socket;
+  void runInteractionTask(interactionQueues, session, async () => {
+    if (state.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    await dispatchBrowserInteraction(state, message);
   });
 }
 
@@ -845,8 +885,15 @@ async function dispatchBrowserTabs(state, message) {
 
 /** Visual actions this worker accepts; kept in sync with INTERACTION_ACTIONS server-side. */
 const INTERACTION_ACTIONS = [
-  "snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload",
+  "snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload", "close_session",
 ];
+
+/** Reject an expired request before it can change a page or the active tab. */
+function checkInteractionDeadline(message) {
+  if (Number.isFinite(message.deadline_ms) && Date.now() >= message.deadline_ms) {
+    throw new Error("browser interaction expired while waiting; take a fresh snapshot");
+  }
+}
 
 /** Execute one visual action and always return the resulting screenshot and element map. */
 async function dispatchBrowserInteraction(state, message) {
@@ -860,8 +907,8 @@ async function dispatchBrowserInteraction(state, message) {
     return;
   }
 
+  const socket = state.socket;
   let debuggerSession = null;
-  let restoreFocusedWindowId = null;
   let stage = "resolve tab";
   const replyOpenDialog = async (tabId, screenshotState, dialog) => {
     const visual = interactionDialogVisualState(
@@ -869,8 +916,6 @@ async function dispatchBrowserInteraction(state, message) {
       screenshotState,
       dialog,
     );
-    await restoreInteractionWindowFocus(restoreFocusedWindowId);
-    restoreFocusedWindowId = null;
     // The session stored in interactionDebuggers must stay attached until the dialog closes.
     debuggerSession = null;
     reply({
@@ -879,7 +924,17 @@ async function dispatchBrowserInteraction(state, message) {
     });
   };
   try {
-    const tab = await interactionTab(state, message.tab_id, action, args.url);
+    checkInteractionDeadline(message);
+    if (action === "close_session") {
+      const closed = await runInteractionTask(interactionRegistryQueue, "registry", async () => {
+        await interactionHydration;
+        checkInteractionDeadline(message);
+        return closeManagedInteractionTab(session, { requireOwned: true });
+      });
+      reply({ ok: true, data: { session: String(message.tab_id || "default"), closed } });
+      return;
+    }
+    const tab = await interactionTab(state, message.tab_id, action, args.url, args.keep_open, message);
     const tabId = tab.id;
     if (tabId == null) throw new Error("interactive Chrome tab has no id");
     const pendingDebugger = interactionDebuggers.get(session) || null;
@@ -942,30 +997,45 @@ async function dispatchBrowserInteraction(state, message) {
     const trustedMouseInput = (action === "click" && !refreshReason)
       || (action === "scroll" && !args.element_id);
     const forceFocus = message.focus_before_input === true && trustedMouseInput;
-    if (forceFocus || action === "click" || action === "dialog") {
-      stage = "focus managed interaction window";
-      restoreFocusedWindowId = await focusManagedInteractionWindow(session, tab, forceFocus);
-    }
+    const needsActiveTab = trustedMouseInput || ["dialog", "type", "press"].includes(action);
 
-    if (action === "dialog") {
-      stage = "handle native dialog";
-      const handled = await executeNativeDialog(debuggerSession, args);
-      if (!handled) {
-        refreshReason = "No Chrome-native dialog is open; visual state refreshed";
-      }
-    } else if (!refreshReason) {
-      stage = "execute action";
+    /** Apply input while the target tab owns focus, then let the page settle outside the queue. */
+    const applyAction = async () => {
+      let restoreFocusedWindowId = null;
+      let inputExpired = false;
+      let timer;
       try {
-        await executeInteractionAction(
-          tabId,
-          action,
-          args,
-          debuggerSession?.target || null,
-          clickPoint,
-        );
+        if (state.socket !== socket) throw new Error("browser bridge disconnected during interaction");
+        checkInteractionDeadline(message);
+        if (needsActiveTab) {
+          stage = "activate managed interaction tab";
+          restoreFocusedWindowId = await focusManagedInteractionWindow(
+            session, tab, forceFocus, action === "click" || action === "dialog",
+          );
+        }
+        checkInteractionDeadline(message);
+        if (needsActiveTab) {
+          // Cancel stalled CDP input without replaying it or abandoning a pending URL check.
+          timer = setTimeout(() => {
+            inputExpired = true;
+            if (!debuggerSession.dialog && debuggerSession.guardTasks.size === 0) {
+              void chrome.debugger.detach(debuggerSession.target).catch(() => {});
+            }
+          }, INTERACTION_INPUT_TIMEOUT_MS);
+        }
+        if (action === "dialog") {
+          stage = "handle native dialog";
+          const handled = await executeNativeDialog(debuggerSession, args);
+          if (!handled) refreshReason = "No Chrome-native dialog is open; visual state refreshed";
+        } else if (!refreshReason) {
+          stage = "execute action";
+          await executeInteractionAction(tabId, action, args, debuggerSession.target, clickPoint);
+        }
       } catch (error) {
-        if (!debuggerSession?.dialog) {
-          if (!isStaleInteractionReferenceError(error)) throw error;
+        if (inputExpired) throw new Error("Chrome input timed out; verify the page before retrying");
+        if (stage !== "execute action" ||
+          (!debuggerSession.dialog && !isStaleInteractionReferenceError(error))) throw error;
+        if (!debuggerSession.dialog) {
           refreshReason = `${error?.message || error}; action skipped and visual state refreshed`;
           console.debug("[browser-mcp-extension] stale action state detected; refreshing", {
             session,
@@ -973,8 +1043,16 @@ async function dispatchBrowserInteraction(state, message) {
             reason: String(error?.message || error),
           });
         }
+      } finally {
+        if (timer != null) clearTimeout(timer);
+        if (restoreFocusedWindowId != null) {
+          await restoreInteractionWindowFocus(restoreFocusedWindowId);
+        }
       }
-    }
+      if (inputExpired) throw new Error("Chrome input timed out; verify the page before retrying");
+    };
+    if (needsActiveTab) await runInteractionTask(interactionInputQueue, "focus", applyAction);
+    else await applyAction();
     if (!refreshReason) {
       stage = "wait for page";
       const settleResult = await settleInteractionTabOrDialog(
@@ -1052,8 +1130,6 @@ async function dispatchBrowserInteraction(state, message) {
       await closeInteractionDebugger(session);
       debuggerSession = null;
     }
-    await restoreInteractionWindowFocus(restoreFocusedWindowId);
-    restoreFocusedWindowId = null;
     lastInteractionScreenshots.set(session, {
       width: screenshot.width,
       height: screenshot.height,
@@ -1070,19 +1146,22 @@ async function dispatchBrowserInteraction(state, message) {
     });
   } catch (error) {
     if (debuggerSession) await closeInteractionDebugger(session);
-    await restoreInteractionWindowFocus(restoreFocusedWindowId);
     reply({ ok: false, error: `${action} failed during ${stage}: ${error?.message || error}` });
   }
 }
 
-/** Focus only an extension-owned interaction window and remember the user's prior window. */
-async function focusManagedInteractionWindow(session, tab, force = false) {
+/** Activate an owned tab inside its window and optionally bring that window to the foreground. */
+async function focusManagedInteractionWindow(session, tab, force, focusWindow) {
   const managedWindowId = interactionWindows.get(session);
   if (managedWindowId == null || managedWindowId !== tab.windowId) return null;
+  // A queued action may start after another session activated a different tab.
+  const current = await chrome.tabs.get(tab.id);
+  if (current.windowId !== managedWindowId) throw new Error("managed tab changed windows; reopen it");
+  if (current.active === false) await chrome.tabs.update(tab.id, { active: true });
+  if (!force && !focusWindow) return null;
   const previous = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
   // Chrome can report this window as last focused while another application covers it.
   if (!force && previous?.id === managedWindowId) return null;
-  if (force && tab.active === false) await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(managedWindowId, { focused: true });
   // Let Chrome finish activating the page surface before trusted input is dispatched.
   await new Promise((resolve) => setTimeout(resolve, force ? 150 : 80));
@@ -1363,62 +1442,106 @@ async function attachInteractionDebugger(tabId) {
   throw new Error(`unable to attach Chrome interaction debugger: ${lastError?.message || lastError}`);
 }
 
-/** Resolve or create the one managed interaction tab for a bridge session. */
-async function interactionTab(state, requestedSession, action, requestedUrl) {
-  await interactionHydration;
-  const session = `${state.port}:${String(requestedSession || "default")}`;
-  const existingTabId = interactiveTabs.get(session);
-  if (existingTabId != null) {
+/** Close an allocated tab and clear its cached screenshot and debugger state. */
+async function closeManagedInteractionTab(session, { requireOwned = false } = {}) {
+  const tabId = interactiveTabs.get(session);
+  if (tabId == null) return false;
+  const windowId = interactionWindows.get(session);
+  if (windowId == null && requireOwned) return false;
+  if (windowId != null) {
     try {
-      const existing = await chrome.tabs.get(existingTabId);
-      const isolatedWindowId = interactionWindows.get(session);
-      const needsIsolatedTab = typeof requestedUrl === "string"
-        && isolatedWindowId !== existing.windowId;
-      if (
-        /^https?:\/\//i.test(String(existing.url || ""))
-        && !needsIsolatedTab
-      ) return existing;
-      if (needsIsolatedTab) {
-        await deleteInteractionSession(session);
-        lastInteractionScreenshots.delete(session);
-        await closeInteractionDebugger(session);
-      } else if (!(action === "snapshot" && typeof requestedUrl === "string")) {
-        throw new Error("managed tab is no longer on a public webpage; provide url to browser_snapshot");
-      } else {
-        await deleteInteractionSession(session);
-        lastInteractionScreenshots.delete(session);
-        await closeInteractionDebugger(session);
-        if (isolatedWindowId === existing.windowId) {
-          await chrome.tabs.remove(existingTabId).catch(() => {});
-        }
+      await chrome.tabs.remove(tabId);
+    } catch (error) {
+      const remaining = await chrome.tabs.get(tabId).catch(() => null);
+      if (remaining) throw error;
+    }
+  }
+  await deleteInteractionSession(session);
+  lastInteractionScreenshots.delete(session);
+  await closeInteractionDebugger(session);
+  return windowId != null;
+}
+
+/** Reclaim idle temporary tabs when the shared window reaches capacity. */
+async function reserveInteractionTab(port) {
+  const prefix = `${port}:`;
+  const sessions = [...interactionWindows.keys()];
+  if (sessions.length < MAX_INTERACTION_TABS) return;
+  const candidates = sessions.filter((key) =>
+    !interactionSessionUsage.get(key)?.keepOpen
+    && !interactionQueues.has(key)
+    && !interactionDebuggers.get(key)?.dialog);
+  candidates.sort((a, b) =>
+    interactionSessionUsage.get(a).lastUsed - interactionSessionUsage.get(b).lastUsed);
+  // Upgrades can inherit more than five tabs from the old per-connection windows.
+  const needed = sessions.length - MAX_INTERACTION_TABS + 1;
+  if (candidates.length < needed) {
+    const ownSessions = sessions.filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length));
+    const detail = ownSessions.length ? `; sessions in this connection: ${ownSessions.join(", ")}` : "";
+    throw new Error(`no room in the shared window: managed sessions are kept open or busy${detail}`);
+  }
+  for (const key of candidates.slice(0, needed)) await closeManagedInteractionTab(key);
+}
+
+/** Open an inactive tab in the profile's owned window, sharing it across bridge connections. */
+async function openManagedInteractionTab() {
+  for (const [key, windowId] of interactionWindows) {
+    const sibling = await chrome.tabs.get(interactiveTabs.get(key)).catch(() => null);
+    if (sibling?.windowId !== windowId) continue;
+    const tab = await chrome.tabs.create({ windowId, url: "about:blank", active: false });
+    if (tab.id == null) throw new Error("Chrome did not create an isolated interaction tab");
+    return tab;
+  }
+  const window = await chrome.windows.create({ url: "about:blank", focused: false, type: "normal" });
+  const [tab] = window.tabs || [];
+  if (tab?.id == null || window.id == null) {
+    if (window.id != null) await chrome.windows.remove(window.id).catch(() => {});
+    throw new Error("Chrome did not create an isolated interaction window");
+  }
+  return tab;
+}
+
+/** Resolve a session under the registry queue, releasing it before navigation and page capture. */
+async function interactionTab(state, requestedSession, action, requestedUrl, keepOpen, message = {}) {
+  const name = String(requestedSession || "default");
+  const session = `${state.port}:${name}`;
+  return runInteractionTask(interactionRegistryQueue, "registry", async () => {
+    await interactionHydration;
+    checkInteractionDeadline(message);
+    const canOpen = action === "snapshot" && typeof requestedUrl === "string"
+      && /^https?:\/\//i.test(requestedUrl);
+    const existingId = interactiveTabs.get(session);
+    if (existingId != null) {
+      const existing = await chrome.tabs.get(existingId).catch(() => null);
+      const windowId = interactionWindows.get(session);
+      if (existing && /^https?:\/\//i.test(String(existing.url || ""))
+        && (windowId === existing.windowId || windowId == null && !canOpen)) {
+        await setInteractionSession(session, existingId, windowId, keepOpen);
+        return existing;
       }
-    } catch {
-      await deleteInteractionSession(session);
-      lastInteractionScreenshots.delete(session);
+      if (existing && !canOpen) {
+        throw new Error("managed tab is no longer on a public webpage or moved; reopen with browser_snapshot and url");
+      }
+      await closeManagedInteractionTab(session);
     }
-  }
-  if (action !== "snapshot") {
-    throw new Error("no interactive tab; call browser_snapshot before browser actions");
-  }
-  if (typeof requestedUrl === "string" && /^https?:\/\//i.test(requestedUrl)) {
-    const createdWindow = await chrome.windows.create({
-      url: "about:blank",
-      focused: false,
-      type: "normal",
-    });
-    const [created] = createdWindow.tabs || [];
-    if (created?.id == null || createdWindow.id == null) {
-      throw new Error("Chrome did not create an isolated interaction window");
+    if (canOpen) {
+      await reserveInteractionTab(state.port);
+      const tab = await openManagedInteractionTab();
+      await setInteractionSession(session, tab.id, tab.windowId, keepOpen);
+      return tab;
     }
-    await setInteractionSession(session, created.id, createdWindow.id);
-    return created;
-  }
-  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (active?.id == null || !/^https?:\/\//i.test(String(active.url || ""))) {
-    throw new Error("no public webpage is active; provide url to browser_snapshot")
-  }
-  await setInteractionSession(session, active.id, null);
-  return active;
+    if (action !== "snapshot" || name !== "default") {
+      throw new Error(`managed session "${name}" is not open; call browser_snapshot with url and this session`);
+    }
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active?.id == null || !/^https?:\/\//i.test(String(active.url || ""))
+      || [...interactiveTabs.values()].includes(active.id)) {
+      throw new Error("no unmanaged public webpage is active; provide url to browser_snapshot");
+    }
+    await setInteractionSession(session, active.id, null, keepOpen);
+    return active;
+  });
 }
 
 /** Execute the requested action while the debugger navigation guard is attached. */
@@ -4131,14 +4254,24 @@ chrome.debugger.onDetach.addListener((source) => {
     interactionDebuggers.delete(session);
   }
 });
+/** Forget Chrome-closed tabs even if the removal arrived during worker startup. */
+async function forgetRemovedInteractionTab(tabId) {
+  await interactionHydration;
+  for (const [session, managedTabId] of interactiveTabs) {
+    if (managedTabId !== tabId) continue;
+    await runInteractionTask(interactionRegistryQueue, "registry", async () => {
+      // A replacement may already have been registered under this name.
+      if (interactiveTabs.get(session) !== tabId) return;
+      await deleteInteractionSession(session);
+      lastInteractionScreenshots.delete(session);
+      await closeInteractionDebugger(session);
+    });
+  }
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   forgetBackgroundTab(tabId);
   void forgetCommentSessionByTab(tabId);
-  for (const [session, managedTabId] of interactiveTabs.entries()) {
-    if (managedTabId !== tabId) continue;
-    void deleteInteractionSession(session);
-    lastInteractionScreenshots.delete(session);
-    void closeInteractionDebugger(session);
-  }
+  void forgetRemovedInteractionTab(tabId);
 });
 void connectAll();

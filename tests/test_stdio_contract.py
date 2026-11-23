@@ -44,6 +44,7 @@ async def test_stdio_initialize_list_call_and_clean_shutdown(tmp_path: Path) -> 
                 "browser_read",
                 "browser_read_page",
                 "browser_snapshot",
+                "browser_close_session",
                 "browser_click",
                 "browser_dialog",
                 "browser_tabs",

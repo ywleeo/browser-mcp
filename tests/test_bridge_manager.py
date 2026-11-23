@@ -195,6 +195,7 @@ async def run_mock_interaction_extension(
     connected: asyncio.Event,
     action: str,
     expected_focus: bool,
+    session: str,
 ) -> None:
     """Emulate one screenshot-bearing visual interaction response."""
     installed = manager.installed
@@ -223,6 +224,8 @@ async def run_mock_interaction_extension(
                 await websocket.send(json.dumps({"type": "pong", "id": message.get("id")}))
             elif message.get("type") == "browser.interact":
                 assert message.get("action") == action
+                assert message.get("tab_id") == session
+                assert "session" not in message["args"]
                 if expected_focus:
                     assert message.get("focus_before_input") is True
                 else:
@@ -575,12 +578,13 @@ async def test_visual_interaction_round_trip_validates_image_and_page_state(
     manager = BridgeManager(settings)
     await manager.start()
     connected = asyncio.Event()
+    session = "orders" if action == "scroll" else "default"
     extension_task = asyncio.create_task(
-        run_mock_interaction_extension(manager, connected, action, expected_focus)
+        run_mock_interaction_extension(manager, connected, action, expected_focus, session)
     )
     try:
         await asyncio.wait_for(connected.wait(), 2)
-        result = await manager.interact(action, {})
+        result = await manager.interact(action, {"session": "orders"} if action == "scroll" else {})
 
         assert result.state.title == "Example"
         assert result.state.viewport.width == 1280

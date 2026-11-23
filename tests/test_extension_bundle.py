@@ -147,7 +147,9 @@ def test_bundle_is_refreshed_while_pairing_token_stays_stable(tmp_path: Path) ->
     assert "closeCommentSessionsForPort(port)" in background
     # Read tabs go through one entry point so a bridge disconnect can close what an evicted
     # service worker left behind, instead of leaking read tabs into the user's tab strip.
-    assert "chrome.tabs.create" not in background
+    # Visual sessions may create tabs only in their dedicated managed window.
+    assert background.count("chrome.tabs.create(") == 1
+    assert 'chrome.tabs.create({ windowId, url: "about:blank", active: false })' in background
     assert "openBackgroundTab(" in background
     read_tabs = (first.directory / "background_tabs.js").read_text(encoding="utf-8")
     assert "export async function openBackgroundTab" in read_tabs

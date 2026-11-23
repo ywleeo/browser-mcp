@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -165,11 +165,35 @@ class BrowserVisualResult(BaseModel):
     screenshot_data: str = Field(repr=False, min_length=1)
 
 
-class BrowserSnapshotRequest(BaseModel):
+# Keep names stable across tools and safe to report in errors and Chrome session storage.
+BrowserSessionName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")]
+
+
+class BrowserInteractionRequest(BaseModel):
+    """Select the managed session that owns the page and its element references."""
+
+    session: BrowserSessionName | None = None
+
+
+class BrowserCloseSessionRequest(BaseModel):
+    """Select an extension-owned visual session to close."""
+
+    session: BrowserSessionName
+
+
+class BrowserCloseSessionResult(BaseModel):
+    """Report whether an open managed tab was closed."""
+
+    session: BrowserSessionName
+    closed: bool
+
+
+class BrowserSnapshotRequest(BrowserInteractionRequest):
     """Validated request for opening or observing one interactive browser tab."""
 
     url: HttpUrl | None = None
     wait_ms: int = Field(default=500, ge=0, le=30_000)
+    keep_open: bool | None = None
 
 
 class BrowserDialogType(StrEnum):
@@ -196,7 +220,7 @@ class BrowserDialogAction(StrEnum):
     DISMISS = "dismiss"
 
 
-class BrowserDialogRequest(BaseModel):
+class BrowserDialogRequest(BrowserInteractionRequest):
     """Validated decision for the currently open Chrome-native dialog."""
 
     action: BrowserDialogAction
@@ -211,7 +235,7 @@ class BrowserClickCoordinateSpace(StrEnum):
     VIEWPORT = "viewport"
 
 
-class BrowserClickRequest(BaseModel):
+class BrowserClickRequest(BrowserInteractionRequest):
     """Validated screenshot-coordinate click with optional saved-center shorthand."""
 
     element_id: str | None = Field(default=None, min_length=1, max_length=32)
@@ -258,7 +282,7 @@ class BrowserScrollDirection(StrEnum):
     RIGHT = "right"
 
 
-class BrowserScrollRequest(BaseModel):
+class BrowserScrollRequest(BrowserInteractionRequest):
     """Validated relative scroll or scroll-to-element request.
 
     The wheel is delivered at a viewport point so Chrome routes it to whichever
@@ -281,7 +305,7 @@ class BrowserScrollRequest(BaseModel):
         return self
 
 
-class BrowserTypeRequest(BaseModel):
+class BrowserTypeRequest(BrowserInteractionRequest):
     """Validated text entry request for an editable referenced element."""
 
     element_id: str = Field(min_length=1, max_length=32)
@@ -310,7 +334,7 @@ class BrowserPressKey(StrEnum):
     SPACE = " "
 
 
-class BrowserPressRequest(BaseModel):
+class BrowserPressRequest(BrowserInteractionRequest):
     """Validated keyboard request optionally focused on one referenced element."""
 
     key: BrowserPressKey
@@ -318,7 +342,7 @@ class BrowserPressRequest(BaseModel):
     wait_ms: int = Field(default=300, ge=0, le=30_000)
 
 
-class BrowserSelectRequest(BaseModel):
+class BrowserSelectRequest(BrowserInteractionRequest):
     """Validated native-select request matched by option value or visible label."""
 
     element_id: str = Field(min_length=1, max_length=32)
@@ -326,7 +350,7 @@ class BrowserSelectRequest(BaseModel):
     wait_ms: int = Field(default=300, ge=0, le=30_000)
 
 
-class BrowserUploadRequest(BaseModel):
+class BrowserUploadRequest(BrowserInteractionRequest):
     """Validated local-file request targeted at one file input on the current page."""
 
     paths: tuple[str, ...] = Field(min_length=1, max_length=10)

@@ -18,6 +18,8 @@ from browser_mcp.config import AppSettings
 from browser_mcp.models import (
     BrowserClickCoordinateSpace,
     BrowserClickRequest,
+    BrowserCloseSessionRequest,
+    BrowserCloseSessionResult,
     BrowserDialogAction,
     BrowserDialogRequest,
     BrowserPressKey,
@@ -27,6 +29,7 @@ from browser_mcp.models import (
     BrowserScrollDirection,
     BrowserScrollRequest,
     BrowserSelectRequest,
+    BrowserSessionName,
     BrowserSnapshotRequest,
     BrowserStatus,
     BrowserTabsResult,
@@ -107,6 +110,7 @@ def _visual_tool_result(result: BrowserVisualResult) -> CallToolResult:
 
 TOOL_GROUP_BY_NAME: dict[str, str] = {
     "browser_click": "core",
+    "browser_close_session": "core",
     "browser_dialog": "core",
     "browser_press": "core",
     "browser_read": "core",
@@ -211,7 +215,9 @@ def create_server(
             "remaining pages, and browser_status for connection diagnostics. For visual "
             "interaction, call browser_snapshot first, choose x/y from its screenshot, and "
             "use the screenshot returned after each action to verify "
-            "the result. Element references expire whenever a new page state is returned. "
+            "the result. For multiple pages, open each with browser_snapshot(url, session) "
+            "and pass the same session to subsequent tools. Element references belong to "
+            "that session and expire whenever a new page state is returned for it. "
             "When a result contains dialog metadata, call browser_dialog before another page "
             "action. If a stale action is skipped and refreshed, retry only with coordinates or "
             "references from that fresh result. "
@@ -282,9 +288,16 @@ def create_server(
         )
         return await browser_service.read_page(request)
 
-    async def _browser_snapshot(url: str | None = None, wait_ms: int = 500) -> CallToolResult:
+    async def _browser_snapshot(
+        url: str | None = None,
+        wait_ms: int = 500,
+        session: BrowserSessionName | None = None,
+        keep_open: bool | None = None,
+    ) -> CallToolResult:
         """Open or observe the managed tab and return its screenshot and interactive elements."""
-        request = BrowserSnapshotRequest.model_validate({"url": url, "wait_ms": wait_ms})
+        request = BrowserSnapshotRequest.model_validate(
+            {"url": url, "wait_ms": wait_ms, "session": session, "keep_open": keep_open}
+        )
         return _visual_tool_result(await browser_service.visual_snapshot(request))
 
     async def _browser_click(
@@ -293,6 +306,7 @@ def create_server(
         y: float | None = None,
         coordinate_space: BrowserClickCoordinateSpace = BrowserClickCoordinateSpace.SCREENSHOT,
         wait_ms: int = 500,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Click one screenshot/viewport coordinate or one saved screenshot center."""
         request = BrowserClickRequest(
@@ -301,6 +315,7 @@ def create_server(
             y=y,
             coordinate_space=coordinate_space,
             wait_ms=wait_ms,
+            session=session,
         )
         return _visual_tool_result(await browser_service.click(request))
 
@@ -308,12 +323,14 @@ def create_server(
         action: BrowserDialogAction,
         prompt_text: str | None = None,
         wait_ms: int = 500,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Handle the current Chrome-native alert, confirm, prompt, or beforeunload dialog."""
         request = BrowserDialogRequest(
             action=action,
             prompt_text=prompt_text,
             wait_ms=wait_ms,
+            session=session,
         )
         return _visual_tool_result(await browser_service.handle_dialog(request))
 
@@ -328,6 +345,7 @@ def create_server(
         x: float | None = None,
         y: float | None = None,
         wait_ms: int = 300,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Scroll relatively or bring one current element reference into view."""
         request = BrowserScrollRequest(
@@ -337,6 +355,7 @@ def create_server(
             x=x,
             y=y,
             wait_ms=wait_ms,
+            session=session,
         )
         return _visual_tool_result(await browser_service.scroll(request))
 
@@ -346,6 +365,7 @@ def create_server(
         clear: bool = True,
         submit: bool = False,
         wait_ms: int = 300,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Enter text into one current editable element and optionally press Enter."""
         request = BrowserTypeRequest(
@@ -354,6 +374,7 @@ def create_server(
             clear=clear,
             submit=submit,
             wait_ms=wait_ms,
+            session=session,
         )
         return _visual_tool_result(await browser_service.type_text(request))
 
@@ -361,18 +382,24 @@ def create_server(
         key: BrowserPressKey,
         element_id: str | None = None,
         wait_ms: int = 300,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Press one bounded non-text key, optionally after focusing a current element."""
-        request = BrowserPressRequest(key=key, element_id=element_id, wait_ms=wait_ms)
+        request = BrowserPressRequest(
+            key=key, element_id=element_id, wait_ms=wait_ms, session=session
+        )
         return _visual_tool_result(await browser_service.press(request))
 
     async def _browser_select(
         element_id: str,
         value: str,
         wait_ms: int = 300,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Select one native option by exact value or visible label."""
-        request = BrowserSelectRequest(element_id=element_id, value=value, wait_ms=wait_ms)
+        request = BrowserSelectRequest(
+            element_id=element_id, value=value, wait_ms=wait_ms, session=session
+        )
         return _visual_tool_result(await browser_service.select(request))
 
     async def _browser_upload(
@@ -380,6 +407,7 @@ def create_server(
         element_id: str | None = None,
         index: int | None = None,
         wait_ms: int = 800,
+        session: BrowserSessionName | None = None,
     ) -> CallToolResult:
         """Attach local files to one file input without opening a native picker."""
         request = BrowserUploadRequest(
@@ -387,8 +415,15 @@ def create_server(
             element_id=element_id,
             index=index,
             wait_ms=wait_ms,
+            session=session,
         )
         return _visual_tool_result(await browser_service.upload(request))
+
+    async def _browser_close_session(session: BrowserSessionName) -> BrowserCloseSessionResult:
+        """Close one extension-owned managed session and free its capacity."""
+        return await browser_service.close_interaction_session(
+            BrowserCloseSessionRequest(session=session)
+        )
 
     async def _site_login_status(platform: SitePlatform) -> SiteLoginStatus:
         """Check one platform login state without executing the requested platform task."""
@@ -691,7 +726,10 @@ def create_server(
         name="browser_snapshot",
         description=(
             "Open a public URL or observe the managed Chrome tab, returning a viewport "
-            "screenshot plus fresh element references for visual interaction."
+            "screenshot plus fresh element references. Pass a named session to keep pages "
+            "separate. Up to five managed tabs share a window. The oldest unused temporary "
+            "session may be recycled at capacity. Set keep_open=true to protect a session "
+            "from recycling, or false to make it temporary again."
         ),
         annotations=ToolAnnotations(
             read_only_hint=True,
@@ -699,6 +737,18 @@ def create_server(
             idempotent_hint=True,
             open_world_hint=True,
         ),
+    )
+    add(
+        _browser_close_session,
+        name="browser_close_session",
+        description="Close an extension-owned visual session and discard its page state.",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
     )
     add(
         _browser_click,

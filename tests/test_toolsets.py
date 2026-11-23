@@ -1,4 +1,4 @@
-"""Tool-group selection: one connection must not have to expose all 41 tools."""
+"""Tool-group selection: one connection must not have to expose all registered tools."""
 
 from __future__ import annotations
 
@@ -22,21 +22,21 @@ def _names(settings: AppSettings) -> list[str]:
 
 def test_every_group_covers_every_registered_tool() -> None:
     """The group table must stay in step with the tools the server registers."""
-    assert len(_names(AppSettings())) == 41
-    assert len(TOOL_GROUP_BY_NAME) == 41
+    assert len(_names(AppSettings())) == 42
+    assert len(TOOL_GROUP_BY_NAME) == 42
     assert set(TOOL_GROUP_NAMES) == set(TOOL_GROUP_BY_NAME.values())
 
 
 def test_default_keeps_every_tool() -> None:
     """An unset selection preserves the previous behavior."""
-    assert len(_names(AppSettings(toolsets=None))) == 41
+    assert len(_names(AppSettings(toolsets=None))) == 42
 
 
 def test_core_and_search_are_the_small_default_set() -> None:
     """The two everyday groups stay well under half of the full surface."""
     names = _names(AppSettings(toolsets=frozenset({"core", "search"})))
 
-    assert len(names) == 15
+    assert len(names) == 16
     assert "browser_read" in names
     assert "google_search" in names
     assert "xhs_search" not in names

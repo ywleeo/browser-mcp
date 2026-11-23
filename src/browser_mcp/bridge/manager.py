@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 from datetime import UTC, datetime
+from time import time
 from typing import Any, Final, cast
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from browser_mcp.bridge.protocol import ConnectionMetadata, ExtensionHello
 from browser_mcp.bridge.registry import PortRegistry
 from browser_mcp.config import AppSettings
 from browser_mcp.models import (
+    BrowserCloseSessionResult,
     BrowserFetchPayload,
     BrowserPageState,
     BrowserReadRequest,
@@ -44,7 +46,7 @@ INTERACTION_TIMEOUT_SECONDS: Final = 65.0
 SHUTDOWN_NOTIFY_TIMEOUT_SECONDS: Final = 1.0
 MAX_MESSAGE_BYTES: Final = 16 * 1024 * 1024
 INTERACTION_ACTIONS: Final = frozenset(
-    {"snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload"}
+    {"snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload", "close_session"}
 )
 
 
@@ -263,12 +265,13 @@ class BridgeManager:
 
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Execute one bounded action in the extension-managed interactive tab."""
-        if action not in INTERACTION_ACTIONS:
+        if action not in INTERACTION_ACTIONS or action == "close_session":
             raise ValueError(f"unsupported browser interaction action: {action}")
         data = await self._request(
             "browser.interact",
-            args,
+            {key: value for key, value in args.items() if key != "session"},
             action=action,
+            tab_id=cast("str | None", args.get("session")) or "default",
             timeout_seconds=INTERACTION_TIMEOUT_SECONDS,
         )
         screenshot_data = data.get("screenshot_data")
@@ -281,6 +284,17 @@ class BridgeManager:
             state=BrowserPageState.model_validate(state),
             screenshot_data=screenshot_data,
         )
+
+    async def close_interaction_session(self, session: str) -> BrowserCloseSessionResult:
+        """Close one extension-owned visual session through the existing action queue."""
+        data = await self._request(
+            "browser.interact",
+            {},
+            action="close_session",
+            tab_id=session,
+            timeout_seconds=INTERACTION_TIMEOUT_SECONDS,
+        )
+        return BrowserCloseSessionResult.model_validate(data)
 
     async def _handle_connection(self, connection: ServerConnection) -> None:
         """Authenticate one WebSocket and process its messages until disconnect."""
@@ -364,6 +378,7 @@ class BridgeManager:
         args: dict[str, object],
         *,
         action: str | None = None,
+        tab_id: str = "default",
         timeout_seconds: float,
     ) -> dict[str, Any]:
         """Send one id-correlated command and fail promptly on timeout or disconnect."""
@@ -381,7 +396,7 @@ class BridgeManager:
         payload: dict[str, object] = {
             "type": message_type,
             "id": request_id,
-            "tab_id": "default",
+            "tab_id": tab_id,
             "args": args,
         }
         if action is not None:
@@ -395,6 +410,8 @@ class BridgeManager:
             payload["focus_before_input"] = True
         try:
             async with self._send_lock:
+                if message_type == "browser.interact":
+                    payload["deadline_ms"] = int((time() + timeout_seconds) * 1000)
                 await connection.send(json.dumps(payload))
             return await asyncio.wait_for(future, timeout_seconds)
         except ConnectionClosed as error:

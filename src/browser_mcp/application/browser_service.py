@@ -10,6 +10,8 @@ from browser_mcp.config import AppSettings
 from browser_mcp.extraction import extract_content
 from browser_mcp.models import (
     BrowserClickRequest,
+    BrowserCloseSessionRequest,
+    BrowserCloseSessionResult,
     BrowserDialogRequest,
     BrowserFetchPayload,
     BrowserPressRequest,
@@ -65,6 +67,10 @@ class BrowserBridge(Protocol):
 
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Execute one visual browser interaction and return the resulting page state."""
+        ...
+
+    async def close_interaction_session(self, session: str) -> BrowserCloseSessionResult:
+        """Close one extension-owned visual session."""
         ...
 
 
@@ -145,7 +151,7 @@ class BrowserService:
 
     async def visual_snapshot(self, request: BrowserSnapshotRequest) -> BrowserVisualResult:
         """Open or observe the managed tab and return an agent-visible screenshot and elements."""
-        args: dict[str, object] = {"wait_ms": request.wait_ms}
+        args = request.model_dump(exclude_none=True, exclude={"url"}, mode="json")
         if request.url is not None:
             url = str(request.url)
             await self._url_policy.validate(url)
@@ -172,7 +178,7 @@ class BrowserService:
 
     async def type_text(self, request: BrowserTypeRequest) -> BrowserVisualResult:
         """Enter text into one referenced editable element and return the new page state."""
-        return await self._interact("type", request.model_dump())
+        return await self._interact("type", request.model_dump(exclude_none=True, mode="json"))
 
     async def press(self, request: BrowserPressRequest) -> BrowserVisualResult:
         """Press one bounded keyboard key in the managed tab."""
@@ -180,15 +186,21 @@ class BrowserService:
 
     async def select(self, request: BrowserSelectRequest) -> BrowserVisualResult:
         """Choose one native select option by value or label."""
-        return await self._interact("select", request.model_dump())
+        return await self._interact("select", request.model_dump(exclude_none=True, mode="json"))
 
     async def upload(self, request: BrowserUploadRequest) -> BrowserVisualResult:
         """Attach authorized local files to one file input without a native picker."""
-        args = request.model_dump()
+        args = request.model_dump(exclude={"session"} if request.session is None else None)
         # Resolve before dispatching: Chrome reads these paths itself, so an
         # unauthorized one must never reach the extension in the first place.
         args["paths"] = list(self._upload_policy.resolve(request.paths))
         return await self._interact("upload", args)
+
+    async def close_interaction_session(
+        self, request: BrowserCloseSessionRequest
+    ) -> BrowserCloseSessionResult:
+        """Release a visual session and report whether it was present."""
+        return await self._bridge.close_interaction_session(request.session)
 
     async def _interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Dispatch one interaction and reject any non-public resulting page URL."""

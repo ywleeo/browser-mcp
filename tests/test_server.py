@@ -33,6 +33,7 @@ async def test_server_exposes_completed_read_and_interaction_tools(tmp_path: Pat
         "browser_read",
         "browser_read_page",
         "browser_snapshot",
+        "browser_close_session",
         "browser_click",
         "browser_dialog",
         "browser_tabs",
@@ -147,6 +148,32 @@ async def test_browser_snapshot_returns_native_image_elements_and_structured_sta
     assert bridge.interactions == [
         ("snapshot", {"wait_ms": 500, "url": "https://example.com/form"})
     ]
+
+
+@pytest.mark.asyncio
+async def test_named_visual_sessions_are_exposed_and_forwarded(tmp_path: Path) -> None:
+    """Agents can open, target and close a session directly through the MCP tool surface."""
+    settings = AppSettings(data_dir=tmp_path)
+    bridge = FakeBridge(tmp_path / "extension")
+    server = create_server(
+        settings,
+        BrowserService(settings, bridge=bridge, url_policy=allow_public_url_policy()),
+    )
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    for action in ("snapshot", "click", "dialog", "scroll", "type", "press", "select", "upload"):
+        assert "session" in tools[f"browser_{action}"].input_schema["properties"]
+
+    snapshot = await server.call_tool(
+        "browser_snapshot", {"url": "https://example.com/", "session": "form", "keep_open": True}
+    )
+    assert isinstance(snapshot, CallToolResult) and not snapshot.is_error
+    scroll = await server.call_tool("browser_scroll", {"session": "form"})
+    assert isinstance(scroll, CallToolResult) and not scroll.is_error
+    closed = await server.call_tool("browser_close_session", {"session": "form"})
+    assert isinstance(closed, CallToolResult) and not closed.is_error
+    assert closed.structured_content == {"session": "form", "closed": True}
+    assert bridge.interactions[0][1]["keep_open"] is True
+    assert [args["session"] for _, args in bridge.interactions] == ["form"] * 3
 
 
 @pytest.mark.asyncio

@@ -343,7 +343,7 @@ that didn't verify.
   real MCP traffic does.
 - A dropped connection no longer discards page state: the brief disconnect an MV3 service
   worker causes when it sleeps only releases debugger attachments, keeping the tab and window
-  for the reconnect. The window is reclaimed only when the MCP server stops on purpose, or when
+  for the reconnect. Managed tabs are reclaimed when the MCP server stops on purpose, or when
   the same port stays unreachable for five minutes.
 - Changed extension dir: rely on the latest `extension_dir` from `browser_status`.
 - Never share `pairing.json` or `pairing-token`; they contain local connection credentials.
@@ -363,6 +363,21 @@ Restart the server and open a managed window with `browser_snapshot` and a URL. 
 the managed Chrome window to the foreground before clicks and wheel input, which can interrupt the
 app you are using. The extension can only restore focus to a previously focused Chrome window.
 
+### Multiple visual sessions
+
+Open a page you want to retain with
+`browser_snapshot(url="https://example.com", session="form", keep_open=true)`, then open a lookup
+page in another session. Pass the matching `session` to subsequent visual tools and use that
+page's screenshot and element references. Omitting `session` selects the existing `default` session.
+
+MCP connections in the same Chrome profile share a managed window with up to five tabs total. At capacity, the extension reclaims
+the least recently used temporary session that has no running request or pending dialog. Named
+sessions are temporary by default, and `default` is kept open. Set
+`browser_snapshot(session="form", keep_open=false)` to make an open session temporary, or call
+`browser_close_session(session="form")` to close its managed tab immediately. To reopen a closed
+session, pass its name and a URL to `browser_snapshot` and use the fresh screenshot.
+Pages can load concurrently. Input that needs focus runs one action at a time.
+
 ### MCP tools
 
 These tools are called automatically by any MCP-capable client. In daily use just describe your goal;
@@ -374,6 +389,7 @@ you don't need to fill in parameters by hand.
 | `browser_read` | general | Opens a page in real Chrome and reads article body, visible text, JS-rendered content, and data returned by page requests; can use the current Chrome login state. |
 | `browser_read_page` | general | Continues reading paginated content while keeping the same page snapshot as the first read. |
 | `browser_snapshot` | interact | Opens a page in a background Chrome window that shares the current login state, without leaving the user's page; returns a viewport screenshot, visible text, and numbered actionable elements (buttons, links, inputs). With no URL, observes the current page. |
+| `browser_close_session` | interact | Closes a named managed tab and frees a slot. |
 | `browser_click` | interact | Moves the trusted pointer and clicks directly at pixels chosen from the current screenshot. The click path traverses neither DOM nor iframes and samples at most the first topmost hover node. `element_id` is only shorthand for a center saved with that screenshot. Screenshot coords map to the CSS viewport; pass `coordinate_space=viewport` explicitly if needed. The action returns a fresh screenshot only; call `browser_snapshot` before another semantic action. |
 | `browser_dialog` | interact | Handles Chrome-native `alert`, `confirm`, `prompt`, and leave-page dialogs. `accept` confirms (and leaves for `beforeunload`); `dismiss` cancels and stays. It always returns a fresh screenshot and element map. If the user already pressed Escape, it safely refreshes visual state. |
 | `browser_scroll` | interact | Scrolls the page up/down/left/right, or brings a given element into view. The wheel lands at screenshot coordinates `x`/`y`, so a point inside a scrollable pane (an editor canvas, a settings panel) scrolls that pane instead of the page; without coordinates the viewport centre is used. |
@@ -414,7 +430,7 @@ you don't need to fill in parameters by hand.
 
 ### Tool groups (expose on demand)
 
-All 41 tools in every request means every schema is re-sent each turn, and a one-line task
+All 42 tools in every request means every schema is re-sent each turn, and a one-line task
 still has to choose among dozens of tools. `BROWSER_MCP_TOOLSETS` exposes only the groups the
 current job needs:
 
@@ -436,7 +452,7 @@ browser-mcp serve --toolsets core,search
 | `reddit` | `reddit_search`, `reddit_post` |
 | `x` | `x_search`, `x_post` |
 
-Unset keeps the previous behavior and registers all 41 tools. An unknown group fails at startup
+Unset keeps the previous behavior and registers all 42 tools. An unknown group fails at startup
 and lists the valid names.
 
 Selection is per connection: each client launches its own server and picks its own set.

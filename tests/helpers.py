@@ -7,6 +7,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from browser_mcp.models import (
+    BrowserCloseSessionResult,
     BrowserElement,
     BrowserFetchPayload,
     BrowserPageState,
@@ -166,6 +167,11 @@ class FakeBridge:
             return self.site_responses[(message_type, action)]
         except KeyError as error:
             raise RuntimeError(f"missing fake response for {message_type}:{action}") from error
+
+    async def close_interaction_session(self, session: str) -> BrowserCloseSessionResult:
+        """Record an explicit session close and return the typed result."""
+        self.interactions.append(("close_session", {"session": session}))
+        return BrowserCloseSessionResult(session=session, closed=True)
 
     async def interact(self, action: str, args: dict[str, object]) -> BrowserVisualResult:
         """Return one deterministic visual state and record the browser action."""
